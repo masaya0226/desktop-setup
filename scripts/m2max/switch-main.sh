@@ -39,6 +39,24 @@ sub_set() {
   fi
 }
 
+# === 主ディスプレイ設定 (Main を主、Sub を左に配置) ===
+apply_primary_display() {
+  local pbp=$1
+  if [ "$pbp" = "2" ]; then
+    # PBP on: Sub 半分(1280x1440) を Main の左に
+    displayplacer \
+      "id:$MAIN_UUID res:2560x1440 hz:60 color_depth:8 enabled:true scaling:on origin:(0,0) degree:0" \
+      "id:$SUB_UUID_ON res:1280x1440 hz:60 color_depth:8 enabled:true scaling:on origin:(-1280,0) degree:0" \
+      >/dev/null 2>&1 || true
+  else
+    # PBP off: Sub フル(2560x1440) を Main の左に
+    displayplacer \
+      "id:$MAIN_UUID res:2560x1440 hz:60 color_depth:8 enabled:true scaling:on origin:(0,0) degree:0" \
+      "id:$SUB_UUID_OFF res:2560x1440 hz:60 color_depth:8 enabled:true scaling:on origin:(-2560,0) degree:0" \
+      >/dev/null 2>&1 || true
+  fi
+}
+
 # === メインモニタが connected=off の場合、一時的に on にして状態取得 ===
 main_connected=$($BD get -uuid="$MAIN_UUID" -connected 2>/dev/null || echo "on")
 if [ "$main_connected" = "off" ]; then
@@ -84,8 +102,10 @@ else
   $BD set -uuid="$MAIN_UUID" -connected=off 2>/dev/null || true
 fi
 
-# === 主ディスプレイをメインモニタに設定 ===
-# TODO: displayplacer のインストールとID取得後に有効化
-# displayplacer "id:<MAIN_ID> origin:(0,0) ..."
+# === 主ディスプレイをメインモニタに設定 (自分がメインになった場合のみ) ===
+if [ "$MY_MAIN_INPUT" = "$TARGET_MAIN" ]; then
+  sleep 1
+  apply_primary_display "$current_pbp"
+fi
 
 osascript -e "display notification \"$NOTIFY\" with title \"Desktop Switcher\""

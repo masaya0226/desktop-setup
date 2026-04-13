@@ -218,8 +218,10 @@ displayplacer list
 - [x] ケーブル接続方式の確定と入力値の確認
 - [x] 2台の PD2730S の UUID 確認（PBPオン/オフ両方）
 - [x] スクリプトに実値を反映
-- [ ] displayplacer のインストールとモニタ ID 確認 (`brew install displayplacer` → `displayplacer list`)
-- [ ] switch-main.sh の displayplacer コマンドを有効化
+- [x] displayplacer のインストールとモニタ ID 確認 (`brew install displayplacer` → `displayplacer list`)
+- [x] switch-main.sh / switch-pbp.sh に displayplacer 呼び出しを組み込み
+- [ ] M2 Max 側で displayplacer のインストール
+- [ ] M2 Max 側の解像度を `displayplacer list` で確認（M3 Air と同じ想定）
 - [ ] PBP右側(0x7E)の KVM 連動可否を調査（OSD設定 / DDC PBP swap）
 
 ### テスト
