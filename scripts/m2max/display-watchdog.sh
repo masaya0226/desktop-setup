@@ -21,7 +21,20 @@ sub_get() {
   echo "$val"
 }
 
+# === 切替スクリプトとの相互排他ロック ===
+LOCK=/tmp/desktop-switcher.lock
+
 while true; do
+  if [ -e "$LOCK" ]; then
+    age=$(( $(date +%s) - $(stat -f %m "$LOCK" 2>/dev/null || echo 0) ))
+    if [ "$age" -gt 30 ]; then
+      rm -f "$LOCK"
+    else
+      sleep 2
+      continue
+    fi
+  fi
+
   pbp=$(sub_get 0x7D)
   sub_main=$(sub_get 0x60)
 

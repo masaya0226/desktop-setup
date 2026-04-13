@@ -1,7 +1,12 @@
 #!/bin/bash
 # Key3: PBP切替（トグル） - M3 Air 用
 # サブモニタ（左）の PBPオン/オフを切り替える
-# 入力設定(0x60, 0x7E)はPBP切替で維持されるため触らない
+
+# === watchdog との相互排他ロック ===
+LOCK=/tmp/desktop-switcher.lock
+cleanup() { sleep 2; rm -f "$LOCK"; }
+trap cleanup EXIT
+: > "$LOCK"
 
 BD="/Applications/BetterDisplay.app/Contents/MacOS/BetterDisplay"
 

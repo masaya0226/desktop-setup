@@ -1,6 +1,12 @@
 #!/bin/bash
 # Key3: PBP切替（トグル） - M2 Max 用
 
+# === watchdog との相互排他ロック ===
+LOCK=/tmp/desktop-switcher.lock
+cleanup() { sleep 2; rm -f "$LOCK"; }
+trap cleanup EXIT
+: > "$LOCK"
+
 BD="/Applications/BetterDisplay.app/Contents/MacOS/BetterDisplay"
 
 # === UUID (M2 Max から見た値) ===

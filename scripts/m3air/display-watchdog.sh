@@ -24,7 +24,22 @@ sub_get() {
   echo "$val"
 }
 
+# === 切替スクリプトとの相互排他ロック ===
+# Key2/Key3 実行中は DDC read や connected write を行わない。
+# 30 秒以上古いロックは stale とみなして削除する (trap 失敗時の保険)。
+LOCK=/tmp/desktop-switcher.lock
+
 while true; do
+  if [ -e "$LOCK" ]; then
+    age=$(( $(date +%s) - $(stat -f %m "$LOCK" 2>/dev/null || echo 0) ))
+    if [ "$age" -gt 30 ]; then
+      rm -f "$LOCK"
+    else
+      sleep 2
+      continue
+    fi
+  fi
+
   pbp=$(sub_get 0x7D)
   sub_main=$(sub_get 0x60)
 

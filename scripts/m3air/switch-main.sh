@@ -3,6 +3,14 @@
 # 構成: [Sub(左,PBP)] [Main(右)]
 # PBP時: Sub左(0x60)=他PC, Sub右(0x7E)=メインPC
 
+# === watchdog との相互排他ロック ===
+# スクリプト実行中は display-watchdog が DDC 読みや connected 書きを行わない。
+# 終了時に 2 秒待ってから解放 → DDC 書き込みの物理反映を待つ。
+LOCK=/tmp/desktop-switcher.lock
+cleanup() { sleep 2; rm -f "$LOCK"; }
+trap cleanup EXIT
+: > "$LOCK"
+
 BD="/Applications/BetterDisplay.app/Contents/MacOS/BetterDisplay"
 
 # === UUID (M3 Air から見た値) ===

@@ -3,6 +3,12 @@
 # 構成: [Sub(左,PBP)] [Main(右)]
 # PBP時: Sub左(0x60)=他PC, Sub右(0x7E)=メインPC
 
+# === watchdog との相互排他ロック ===
+LOCK=/tmp/desktop-switcher.lock
+cleanup() { sleep 2; rm -f "$LOCK"; }
+trap cleanup EXIT
+: > "$LOCK"
+
 BD="/Applications/BetterDisplay.app/Contents/MacOS/BetterDisplay"
 
 # === UUID (M2 Max から見た値) ===

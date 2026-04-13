@@ -222,6 +222,14 @@ displayplacer list
 
 ---
 
+## watchdog と切替スクリプトの相互排他
+
+Key2/Key3 の実行中に watchdog が DDC の中間状態を読んで connected を誤上書きしうる問題 (A/B シナリオ) の対策として、**ロックファイル `/tmp/desktop-switcher.lock`** による相互排他を実装。
+
+- 切替スクリプト: 起動時に lock 作成、`trap EXIT` で 2 秒 sleep 後に削除 (DDC 安定待ち込み)
+- watchdog: ループ先頭で lock 存在チェック、存在すればスキップ
+- Stale 対策: 30 秒以上古いロックは watchdog 側で強制削除 (trap 失敗時の保険)
+
 ## 修正済みバグ
 
 ### 1. switch-main.sh メインモニタ DDC read/write の不安定性 (修正済み、検証済み)
