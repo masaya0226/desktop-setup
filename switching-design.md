@@ -97,6 +97,7 @@ S7 ←————————→ S9
 
 ### DDC 操作の注意点
 
+- **PBP オフ時、0x7E への書き込みは BenQ に silent drop される**（書き込みコマンドは exit=0 を返すが値は変わらない）。PBP オン遷移時に 0x7E を書き直す設計にすること。
 - **連続書き込みには sleep 1 が必要**（間隔が短いと2つ目が無視される）
 - **PBPオン/オフでUUIDが変わる可能性あり**（旧BenQで確認済み。新サブモニタでも要確認）
 - DDC書き込みは BetterDisplay CLI 経由: `/Applications/BetterDisplay.app/Contents/MacOS/BetterDisplay`
@@ -221,26 +222,30 @@ displayplacer list
 
 ---
 
-## 現在の課題 (要調査)
+## 修正済みバグ
 
-### 1. チェーン実行時に switch-main.sh の直接 DDC write が "Failed." 出力
-- `$BD set -uuid=$MAIN_UUID -ddc -vcp=0x60 -value=$TARGET_MAIN` が stderr に "Failed." を出すケースあり
-- 実際に書き込み失敗しているのか、BetterDisplay の通常出力なのか不明
-- 連続して切替を走らせたとき(S1→S7→S9→S7→S1→S3)、最終状態が期待と異なっていた
-- **要調査**: BetterDisplay の直接 DDC write の出力仕様、および connected=off 状態から enable 直後の DDC 安定性
+### 1. switch-main.sh メインモニタ DDC read/write の不安定性 (修正済み、検証済み)
+- `main_set_input` ヘルパーを追加し、stderr を捕捉して "Failed." を検出したら最大3回リトライ
+- `main_get_input` ヘルパーを追加し、空値時に最大5回 (sleep 1s 間隔) リトライ
+- current_main が取れない場合は通知を出して中断 (誤方向トグル防止)
+- connected=off→on 復帰後の sleep を 1s → 2s に延長
 
-### 2. PBP 切替直後の DDC 読み取り不安定
-- 切替直後数秒間は、読み取り値が古かったり失敗したりする
-- 書き込み自体は成功しているが、読み取りだけ不安定な可能性が高い
-- 現状のスクリプトは問題なく動作するが、デバッグ時に状態確認が難しい
+### 2. PBP オフ時の 0x7E silent drop (真の root cause、修正済み、検証済み)
+- **現象**: switch-main.sh の PBP off 分岐で `$BD set -ddc -vcp=0x7E` が **exit=0 stderr空 の見かけ成功** を返すが、実際には書き込みが反映されない
+- **原因**: BenQ PD2730S は PBP オフ時に 0x7E (= PBP 右側入力) への書き込みを silent drop する
+- **影響**: 不変条件「0x7E は常にメインPC」が維持できず、次回 PBP オン遷移で **左右逆転** (旧 issue 3)
+- **対策**:
+  - switch-main.sh PBP off 分岐から 0x7E 書き込みを削除 (0x60 のみ)
+  - switch-pbp.sh PBP off→on 分岐で 0x7E を明示的に書き直す
+  - `sub_set_verified` ヘルパーを追加 (write → sleep 1 → read-back → mismatch なら最大3回リトライ)
+  - 最終 read-back が空値なら警告抑制 (DDC 不安定 = 確認不能)
 
-### 3. チェーン実行後の PBP 左右逆転
-- 長いチェーンテストの最終状態で Sub 0x60/0x7E が想定と逆になった (メインPCが左)
-- 手動で 0x7E/0x60 を swap して修正した
-- 再現条件の特定が必要
+### 3. 修正済みバグ (参考)
+- `switch-main.sh` PBP off ブランチで、サブモニタの 0x60/0x7E にメインモニタの入力値 ($TARGET_MAIN) を書き込んでいた。サブモニタの入力値 ($TARGET_SUB_MAIN) を使うように修正済み
 
-### 4. 修正済みバグ (参考)
-- `switch-main.sh` PBP off ブランチで、サブモニタの 0x60/0x7E にメインモニタの入力値 ($TARGET_MAIN) を書き込んでいた。サブモニタの入力値 ($TARGET_SUB_MAIN) を使うように修正済み (m3air/m2max 両方)
+## 現在の課題
+
+なし (主要な既知バグはすべて修正・検証済み)。
 
 ## 未完了タスク
 
@@ -259,8 +264,8 @@ displayplacer list
 
 - [x] S1↔S3 (switch-main.sh、PBPオン時のメイン入替) — OK
 - [x] S3↔S9 (switch-pbp.sh、M3 Air がメインの状態) — OK
-- [~] S1↔S7 (switch-pbp.sh、M2 Max がメインの状態) — チェーン実行で通したが最終状態が不整合。単独再テスト必要
-- [~] S7↔S9 (switch-main.sh、PBPオフ時のメイン入替) — バグ修正後のテスト未完了 (チェーン中 "Failed." 出力)
+- [x] S1↔S7 (switch-pbp.sh、M2 Max がメインの状態) — 0x7E silent drop 対策後 OK
+- [x] S7↔S9 (switch-main.sh、PBPオフ時のメイン入替) — 0x7E silent drop 対策後 OK
 - [x] switch-main.sh / switch-pbp.sh での BetterDisplay `-main=on` による主ディスプレイ維持 — OK
 - [ ] display-watchdog.sh の動作テスト (未起動)
 - [ ] M2 Max 側からの実行テスト
@@ -268,20 +273,23 @@ displayplacer list
 
 ### 実装
 
-- [ ] Hammerspoon 設定（F20/F21 → スクリプト実行）
-- [ ] Vial で Corne の Adjust レイヤーに F20/F21 配置
-- [ ] display-watchdog.sh の launchd 常駐設定 (両 Mac)
+- [x] Hammerspoon 設定 — M3 Air: `~/.hammerspoon/init.lua` 配置、**f19 → switch-main.sh, f20 → switch-pbp.sh** (macOS/Hammerspoon は F20 までしかサポートしないため当初計画の F20/F21 から変更)
+- [x] Hammerspoon autoLaunch 有効化 (M3 Air)
+- [ ] **Vial で Corne の Adjust レイヤーに f19/f20 配置** ← 手動作業
+- [x] display-watchdog.sh の launchd 常駐設定 (M3 Air) — `~/Library/LaunchAgents/com.masayaabe.desktop-watchdog.plist`。TCC 制約により `~/.local/bin/desktop-watchdog-m3air.sh` にコピーして実行
 - [x] M2 Max 用スクリプト作成 — scripts/m2max/ に配置済み (動作未確認)
 - [ ] M2 Max に BetterDisplay, Hammerspoon, displayplacer インストール
 - [ ] M2 Max でリポジトリ clone + 動作確認
+- [ ] M2 Max 側でも同様に Hammerspoon + launchd watchdog セットアップ
+
+### M3 Air セットアップ時の注意
+
+- **display-watchdog.sh は ~/Library/LaunchAgents から ~/Documents 配下を直接実行できない**。macOS TCC が `/bin/bash` の Documents アクセスをブロックするため、スクリプトを `~/.local/bin/desktop-watchdog-m3air.sh` にコピーして plist はそちらを指す
+- watchdog のロジックを修正したら、`cp scripts/m3air/display-watchdog.sh ~/.local/bin/desktop-watchdog-m3air.sh && launchctl kickstart -k gui/$(id -u)/com.masayaabe.desktop-watchdog` で反映
 
 ## 次セッションでの優先タスク
 
-1. **残テストの再実施** (switch-main.sh バグ修正後)
-   - S9↔S7 / S1↔S7 を単独で確認
-   - "Failed." 出力が再発するか確認
-2. **BetterDisplay "Failed." 出力の解明**
-   - 直接 DDC write の stderr 内容確認
-   - connected enable 直後の sleep を増やすべきか検証
-3. **M2 Max 側の準備と動作確認**
-4. **watchdog の起動と動作確認**
+1. **M2 Max 側の準備と動作確認** (BetterDisplay / Hammerspoon / displayplacer インストール、実行テスト)
+2. **watchdog の起動と動作確認** (launchd 常駐設定)
+3. **Hammerspoon で Corne F20/F21 → スクリプト実行の接続**
+4. **長時間運用テスト**

@@ -38,6 +38,27 @@ sub_set() {
   fi
 }
 
+# 書き込み後に読み戻して一致するまで最大 3 回リトライする。
+# BenQ が書き込みを silent drop するケースや PBP 遷移直後の不安定期に対応。
+sub_set_verified() {
+  local vcp=$1
+  local value=$2
+  local got=""
+  for _ in 1 2 3; do
+    sub_set $vcp $value
+    sleep 1
+    got=$(sub_get $vcp)
+    if [ "$got" = "$value" ]; then
+      return 0
+    fi
+  done
+  if [ -z "$got" ]; then
+    return 0
+  fi
+  printf 'sub_set_verified mismatch: vcp=%s value=%s got=%s\n' "$vcp" "$value" "$got" >&2
+  return 1
+}
+
 # === 主ディスプレイ設定 ===
 set_main_display() {
   $BD set -uuid="$MAIN_UUID" -main=on >/dev/null 2>&1 || true
@@ -67,18 +88,17 @@ if [ "$current_pbp" = "2" ]; then
   # PBP オン → オフ
   # 順序: 先に 0x60=メインPC にして [main|main] 状態にしてから PBP off
   # → 他PCの瞬間露出を避ける
-  sub_set 0x60 $SUB_MAIN_PC
-  sleep 1
-  sub_set 0x7D 0
+  sub_set_verified 0x60 $SUB_MAIN_PC
+  sub_set_verified 0x7D 0
   NEW_PBP=0
   osascript -e 'display notification "PBP オフ" with title "Desktop Switcher"'
 else
   # PBP オフ → オン
-  # 不変条件により 0x7E は既にメインPC。PBP on すると [main|main] に。
-  # 続けて 0x60=他PC で [other|main] 完成
-  sub_set 0x7D 2
-  sleep 1
-  sub_set 0x60 $SUB_OTHER_PC
+  # switch-main.sh は PBP off 時に 0x7E を書けないため、ここで 0x7E=メインPC
+  # を明示的に書く (silent drop 対策は sub_set_verified が担う)。
+  sub_set_verified 0x7D 2
+  sub_set_verified 0x7E $SUB_MAIN_PC
+  sub_set_verified 0x60 $SUB_OTHER_PC
   NEW_PBP=2
   osascript -e 'display notification "PBP オン" with title "Desktop Switcher"'
 fi
