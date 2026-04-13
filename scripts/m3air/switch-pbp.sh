@@ -16,15 +16,29 @@ SUB_UUID_OFF="B02476A6-81D7-444F-B03B-DC515516025A"
 SUB_UUID_ON="4B3EC4EE-1A27-499D-A8A0-DA1F9B545E20"
 
 # === 入力値定数 ===
-MAIN_AIR=21   # TB
-MAIN_MAX=17   # HDMI
-SUB_AIR=21    # TB
-SUB_MAX=15    # DP
+MAIN_AIR=21
+MAIN_MAX=17
+SUB_AIR=21
+SUB_MAX=15
 
-# === 自分のメインモニタ入力値 ===
-MY_MAIN_INPUT=$MAIN_AIR   # M3 Air は TB
+# === 自分の入力値 ===
+MY_MAIN_INPUT=$MAIN_AIR
 
-# === サブモニタ DDC ヘルパー (PBP状態でUUIDが変わるため両方試行) ===
+# === 通知 ===
+notify() {
+  osascript -e "display notification \"$1\" with title \"Desktop Switcher\"" 2>/dev/null || true
+}
+
+# === BD host alive ===
+bd_host_alive() { pgrep -x BetterDisplay >/dev/null; }
+
+# === BD recover (Redetect Displays 相当) ===
+bd_recover() {
+  $BD perform -reconfigure >/dev/null 2>&1 || true
+  sleep 2
+}
+
+# === サブモニタ DDC ヘルパー ===
 sub_get() {
   local vcp=$1
   local val
@@ -43,8 +57,6 @@ sub_set() {
   fi
 }
 
-# 書き込み後に読み戻して一致するまで最大 3 回リトライする。
-# BenQ が書き込みを silent drop するケースや PBP 遷移直後の不安定期に対応。
 sub_set_verified() {
   local vcp=$1
   local value=$2
@@ -64,53 +76,106 @@ sub_set_verified() {
   return 1
 }
 
+# === メインモニタ DDC 読み取り (リトライ + recover) ===
+main_get_input() {
+  local val=""
+  local pass
+  for pass in 1 2; do
+    for _ in 1 2 3 4 5; do
+      val=$($BD get -uuid="$MAIN_UUID" -ddc -vcp=0x60 2>/dev/null || echo "")
+      if [ -n "$val" ]; then
+        echo "$val"
+        return 0
+      fi
+      sleep 1
+    done
+    [ "$pass" = "1" ] && bd_recover
+  done
+  return 1
+}
+
+# === main connected=on を確実に ===
+main_ensure_connected_on() {
+  local err try
+  for try in 1 2 3; do
+    err=$($BD set -uuid="$MAIN_UUID" -connected=on 2>&1 >/dev/null)
+    if [ -z "$err" ] || ! printf '%s' "$err" | grep -qi "fail"; then
+      sleep 1
+      return 0
+    fi
+    bd_recover
+  done
+  return 1
+}
+
 # === 主ディスプレイ設定 ===
 set_main_display() {
   $BD set -uuid="$MAIN_UUID" -main=on >/dev/null 2>&1 || true
 }
 
-# === メインPC判定 (メインモニタの 0x60 から) ===
-current_main=$($BD get -uuid="$MAIN_UUID" -ddc -vcp=0x60 2>/dev/null || echo "")
+# =============================================================
+# === 本体処理 ===
+# =============================================================
+
+# --- preflight ---
+if ! bd_host_alive; then
+  notify "BetterDisplay 本体未起動。中断しました。"
+  exit 1
+fi
+
+# --- main connected が off/空なら復旧 ---
+main_connected=$($BD get -uuid="$MAIN_UUID" -connected 2>/dev/null || echo "")
+if [ "$main_connected" != "on" ]; then
+  main_ensure_connected_on || true
+fi
+
+# --- メインPC 判定 ---
+current_main=$(main_get_input || echo "")
+if [ -z "$current_main" ]; then
+  notify "メインモニタ DDC 読み取り失敗。中断しました。"
+  exit 1
+fi
+
 is_self_main=0
 if [ "$current_main" = "$MY_MAIN_INPUT" ]; then
   is_self_main=1
 fi
 
-# メインPC / 他PC の Sub 入力値を決定
+# サブモニタ入力値を決定 (current_main 信頼)
 if [ "$current_main" = "$MAIN_AIR" ]; then
-  SUB_MAIN_PC=$SUB_AIR    # メインPCはAir → Sub側もAir(TB)
+  SUB_MAIN_PC=$SUB_AIR
   SUB_OTHER_PC=$SUB_MAX
 else
   SUB_MAIN_PC=$SUB_MAX
   SUB_OTHER_PC=$SUB_AIR
 fi
 
-# === 現在の PBP 状態を取得 ===
+# --- 現在の PBP 状態を取得 ---
 current_pbp=$(sub_get 0x7D)
 [ -z "$current_pbp" ] && current_pbp=0
 
 if [ "$current_pbp" = "2" ]; then
   # PBP オン → オフ
-  # 順序: 先に 0x60=メインPC にして [main|main] 状態にしてから PBP off
-  # → 他PCの瞬間露出を避ける
+  # 先に 0x60=メインPC にして [main|main] 状態にしてから PBP off (他PC瞬間露出防止)
   sub_set_verified 0x60 $SUB_MAIN_PC
   sub_set_verified 0x7D 0
-  NEW_PBP=0
-  osascript -e 'display notification "PBP オフ" with title "Desktop Switcher"'
+  NOTIFY="PBP オフ"
 else
   # PBP オフ → オン
-  # switch-main.sh は PBP off 時に 0x7E を書けないため、ここで 0x7E=メインPC
-  # を明示的に書く (silent drop 対策は sub_set_verified が担う)。
+  # switch-main は PBP off 時に 0x7E を書けないため、ここで 0x7E=メインPC を書き直す
   sub_set_verified 0x7D 2
   sub_set_verified 0x7E $SUB_MAIN_PC
   sub_set_verified 0x60 $SUB_OTHER_PC
-  NEW_PBP=2
-  osascript -e 'display notification "PBP オン" with title "Desktop Switcher"'
+  NOTIFY="PBP オン"
 fi
 
-# === PBP切替後にメインモニタを主ディスプレイに復帰 (自分がメインの場合のみ) ===
-# PBP切替時に macOS が主ディスプレイを reassign してしまう対策
+# --- connected 管理 (自分がメインなら on、そうでなければ off を idempotent に) ---
 if [ "$is_self_main" = "1" ]; then
+  main_ensure_connected_on || true
   sleep 1
   set_main_display
+else
+  $BD set -uuid="$MAIN_UUID" -connected=off 2>/dev/null || true
 fi
+
+notify "$NOTIFY"

@@ -4,8 +4,6 @@
 # PBP時: Sub左(0x60)=他PC, Sub右(0x7E)=メインPC
 
 # === watchdog との相互排他ロック ===
-# スクリプト実行中は display-watchdog が DDC 読みや connected 書きを行わない。
-# 終了時に 2 秒待ってから解放 → DDC 書き込みの物理反映を待つ。
 LOCK=/tmp/desktop-switcher.lock
 cleanup() { sleep 2; rm -f "$LOCK"; }
 trap cleanup EXIT
@@ -27,6 +25,23 @@ SUB_MAX=15    # DP
 # === 自分の入力値 ===
 MY_MAIN_INPUT=$MAIN_AIR
 MY_SUB_INPUT=$SUB_AIR
+
+# === 通知 ===
+notify() {
+  osascript -e "display notification \"$1\" with title \"Desktop Switcher\"" 2>/dev/null || true
+}
+
+# === BD host (GUI 本体) が動いているか ===
+bd_host_alive() {
+  pgrep -x BetterDisplay >/dev/null
+}
+
+# === BD 状態リカバリ (Redetect Displays 相当) ===
+# UUID lost / "Failed." / 空読み返しから復旧を試みる。
+bd_recover() {
+  $BD perform -reconfigure >/dev/null 2>&1 || true
+  sleep 2
+}
 
 # === サブモニタ DDC ヘルパー (PBP状態でUUIDが変わるため両方試行) ===
 sub_get() {
@@ -61,8 +76,7 @@ sub_set_verified() {
       return 0
     fi
   done
-  # 最終 read-back が空値の場合は DDC 不安定 (確認不能) とみなし警告のみ。
-  # 非空で不一致のときのみ明確な失敗として stderr に出す。
+  # 最終 read-back が空値なら DDC 確認不能として警告抑制
   if [ -z "$got" ]; then
     return 0
   fi
@@ -70,104 +84,143 @@ sub_set_verified() {
   return 1
 }
 
-# === 主ディスプレイ設定 (メインモニタを主ディスプレイに固定) ===
-# BetterDisplay の -main=on を使う。displayplacer と違い Spaces 再配置なし。
+# === 主ディスプレイ設定 ===
 set_main_display() {
   $BD set -uuid="$MAIN_UUID" -main=on >/dev/null 2>&1 || true
 }
 
-# === メインモニタ DDC ヘルパー (リトライ付き) ===
-# チェーン実行や connected=on 復帰直後は DDC が不安定なため、空値や
-# "Failed." 出力に対して最大数回リトライする。
+# === メインモニタ DDC 読み取り (リトライ + recover) ===
 main_get_input() {
   local val=""
-  for _ in 1 2 3 4 5; do
-    val=$($BD get -uuid="$MAIN_UUID" -ddc -vcp=0x60 2>/dev/null || echo "")
-    if [ -n "$val" ]; then
-      echo "$val"
-      return 0
-    fi
-    sleep 1
+  local pass
+  for pass in 1 2; do
+    for _ in 1 2 3 4 5; do
+      val=$($BD get -uuid="$MAIN_UUID" -ddc -vcp=0x60 2>/dev/null || echo "")
+      if [ -n "$val" ]; then
+        echo "$val"
+        return 0
+      fi
+      sleep 1
+    done
+    # 1 巡目で取れなかったら recover して再挑戦
+    [ "$pass" = "1" ] && bd_recover
   done
   return 1
 }
 
+# === メインモニタ DDC 書き込み (リトライ + recover) ===
 main_set_input() {
   local value=$1
-  local err
-  for _ in 1 2 3; do
-    err=$($BD set -uuid="$MAIN_UUID" -ddc -vcp=0x60 -value=$value 2>&1 >/dev/null)
-    if [ -z "$err" ] || ! printf '%s' "$err" | grep -qi "fail"; then
-      return 0
-    fi
-    sleep 1
+  local err pass
+  for pass in 1 2; do
+    for _ in 1 2 3; do
+      err=$($BD set -uuid="$MAIN_UUID" -ddc -vcp=0x60 -value=$value 2>&1 >/dev/null)
+      if [ -z "$err" ] || ! printf '%s' "$err" | grep -qi "fail"; then
+        return 0
+      fi
+      sleep 1
+    done
+    [ "$pass" = "1" ] && bd_recover
   done
-  printf 'main_set_input: DDC write failed: %s\n' "$err" >&2
+  printf 'main_set_input failed: %s\n' "$err" >&2
   return 1
 }
 
-# === メインモニタが connected=off の場合、一時的に on にして状態取得 ===
-main_connected=$($BD get -uuid="$MAIN_UUID" -connected 2>/dev/null || echo "on")
-if [ "$main_connected" = "off" ]; then
-  $BD set -uuid="$MAIN_UUID" -connected=on 2>/dev/null || true
-  # enable 直後は DDC が不安定。main_get_input のリトライと合わせて 2s 待機。
-  sleep 2
+# === 書き込み後に読み戻して一致するまでリトライ ===
+main_set_input_verified() {
+  local value=$1
+  local got
+  for _ in 1 2 3; do
+    main_set_input $value
+    sleep 1
+    got=$(main_get_input 2>/dev/null || echo "")
+    if [ "$got" = "$value" ]; then
+      return 0
+    fi
+  done
+  printf 'main_set_input_verified mismatch: value=%s got=%s\n' "$value" "$got" >&2
+  return 1
+}
+
+# === main connected=on を確実に (Failed. 時は recover してリトライ) ===
+main_ensure_connected_on() {
+  local err try
+  for try in 1 2 3; do
+    err=$($BD set -uuid="$MAIN_UUID" -connected=on 2>&1 >/dev/null)
+    if [ -z "$err" ] || ! printf '%s' "$err" | grep -qi "fail"; then
+      sleep 1
+      return 0
+    fi
+    bd_recover
+  done
+  return 1
+}
+
+# =============================================================
+# === 本体処理 ===
+# =============================================================
+
+# --- preflight: BD host alive ---
+if ! bd_host_alive; then
+  notify "BetterDisplay 本体未起動。中断しました。"
+  exit 1
 fi
 
-# === 現在の状態を取得 ===
+# --- main connected が off または空なら on へ復旧 ---
+main_connected=$($BD get -uuid="$MAIN_UUID" -connected 2>/dev/null || echo "")
+if [ "$main_connected" != "on" ]; then
+  main_ensure_connected_on || true
+fi
+
+# --- 現在状態取得 ---
 current_main=$(main_get_input || echo "")
 current_pbp=$(sub_get 0x7D)
 [ -z "$current_pbp" ] && current_pbp=0
 
-# current_main が取れない場合はトグル方向不明のため中断 (誤方向切替防止)
 if [ -z "$current_main" ]; then
-  osascript -e 'display notification "メインモニタ DDC 読み取り失敗。中断しました。" with title "Desktop Switcher"'
+  notify "メインモニタ DDC 読み取り失敗。中断しました。"
   exit 1
 fi
 
+# --- トグル方向決定 ---
 if [ "$current_main" = "$MAIN_AIR" ]; then
-  # Air → Max
   TARGET_MAIN=$MAIN_MAX
-  TARGET_SUB_MAIN=$SUB_MAX    # サブモニタでの新メインPC(Max)入力値
-  TARGET_SUB_OTHER=$SUB_AIR   # サブモニタでの他PC(Air)入力値
+  TARGET_SUB_MAIN=$SUB_MAX
+  TARGET_SUB_OTHER=$SUB_AIR
   NOTIFY="M2 Max に切替"
 else
-  # Max → Air
   TARGET_MAIN=$MAIN_AIR
   TARGET_SUB_MAIN=$SUB_AIR
   TARGET_SUB_OTHER=$SUB_MAX
   NOTIFY="M3 Air に切替"
 fi
 
-# === メインモニタの入力切替 ===
-main_set_input $TARGET_MAIN
+# --- メインモニタ入力切替 (書き込み + 読み戻し検証) ---
+if ! main_set_input_verified $TARGET_MAIN; then
+  notify "メインモニタ切替失敗。中断しました。"
+  exit 1
+fi
 
-# === サブモニタの入力切替 ===
+# --- サブモニタ入力切替 ---
 if [ "$current_pbp" = "2" ]; then
-  # PBP on: Sub左(0x60)=他PC, 右(0x7E)=メインPC
-  # 先に右(0x7E)を変更してから左(0x60)を切替 (設計書の推奨順)
+  # PBP on: Sub 左(0x60)=他PC, 右(0x7E)=メインPC
+  # 0x7E を先に変更してから 0x60 (設計書の推奨順)
   sleep 1
   sub_set_verified 0x7E $TARGET_SUB_MAIN
   sub_set_verified 0x60 $TARGET_SUB_OTHER
 else
-  # PBP off: 0x60(表示) のみメインPCに書く
-  # 0x7E は PBP off 時に BenQ が書き込みを silent drop するため触らない。
-  # 不変条件「0x7E=メインPC」は switch-pbp.sh の PBP on 遷移時に明示的に書き直す。
+  # PBP off: 0x60 のみ。0x7E は silent drop するため触らない
   sleep 1
   sub_set_verified 0x60 $TARGET_SUB_MAIN
 fi
 
-# === メインモニタ connected 管理 (幽霊スペース対策) ===
+# --- メインモニタ connected 管理 (幽霊スペース対策) ---
 if [ "$MY_MAIN_INPUT" = "$TARGET_MAIN" ]; then
-  $BD set -uuid="$MAIN_UUID" -connected=on 2>/dev/null || true
+  main_ensure_connected_on || true
+  sleep 1
+  set_main_display
 else
   $BD set -uuid="$MAIN_UUID" -connected=off 2>/dev/null || true
 fi
 
-# === メインモニタを主ディスプレイに復帰 (自分がメインになった場合のみ) ===
-if [ "$MY_MAIN_INPUT" = "$TARGET_MAIN" ]; then
-  sleep 1
-  set_main_display
-fi
-
-osascript -e "display notification \"$NOTIFY\" with title \"Desktop Switcher\""
+notify "$NOTIFY"
