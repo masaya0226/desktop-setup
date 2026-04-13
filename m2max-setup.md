@@ -203,7 +203,55 @@ Vial で Corne の Adjust レイヤーに以下を配置:
 
 両 Mac 共通 (KVM 切替後に同じキーがそのまま使える)。
 
-## 9. 最終チェック
+## 9. リポジトリ更新の反映手順
+
+M3 Air 側での修正が GitHub に push された後、M2 Max 側で変更を取り込むときの手順。
+
+### 基本 (スクリプト修正のみ)
+
+```bash
+cd ~/Documents/projects/desktop_setup
+git pull
+```
+
+`scripts/m2max/switch-main.sh` / `switch-pbp.sh` の修正はこれだけで反映される (Hammerspoon は `~/.hammerspoon/init.lua` から直接リポジトリ内のスクリプトを実行するため)。
+
+### watchdog の修正を含む場合 (重要)
+
+`scripts/m2max/display-watchdog.sh` が変更された場合は、launchd が参照しているコピー (`~/.local/bin/desktop-watchdog-m2max.sh`) を再生成 + kickstart する必要がある。
+
+```bash
+cd ~/Documents/projects/desktop_setup
+git pull
+cp scripts/m2max/display-watchdog.sh ~/.local/bin/desktop-watchdog-m2max.sh
+launchctl kickstart -k gui/$(id -u)/com.masayaabe.desktop-watchdog
+# 確認
+sleep 2
+launchctl list | grep desktop-watchdog      # pid が更新されていること
+pgrep -fl desktop-watchdog-m2max             # 新しい bash プロセスが走っていること
+```
+
+> なぜ再コピーが必要か: launchd から起動される `/bin/bash` は macOS の TCC で `~/Documents` 配下にアクセスできないため、スクリプトの実体は `~/.local/bin` に置いている (セクション 7 参照)。`git pull` だけではこちらは更新されない。
+
+### Hammerspoon init.lua の修正を含む場合
+
+```bash
+cd ~/Documents/projects/desktop_setup
+git pull
+# init.lua は ~/.hammerspoon/ にあるのでリポジトリ外。手動で差分を反映してから:
+hs -c 'hs.reload()'
+```
+
+### まとめ (チートシート)
+
+| 変更対象 | 必要な追加手順 |
+|---|---|
+| `scripts/m2max/switch-*.sh` | なし (git pull のみ) |
+| `scripts/m2max/display-watchdog.sh` | `~/.local/bin/` へ再コピー + launchctl kickstart |
+| `~/.hammerspoon/init.lua` | 手動反映 + `hs -c 'hs.reload()'` |
+| `plist` (LaunchAgent) | `launchctl unload && load` |
+
+## 10. 最終チェック
 
 - [ ] 4状態 (S1/S3/S7/S9) を Corne ショートカットだけで行き来できる
 - [ ] PBP オン時に「自分がサブ側」になると幽霊スペースが生じない (watchdog が connected=off に補完)
