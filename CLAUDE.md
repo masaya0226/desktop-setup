@@ -11,9 +11,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `switching-design.md` — **最新の設計書**（状態定義、DDC VCPコード、スクリプト仕様、テスト状況、未完了タスク）
 - `handoff-context.md` — 初期の議論と決定事項の引き継ぎ資料（iiyama+BenQ時代）
 - `desktop-setup-guide.md` — Phase 0〜7 の全セットアップ手順書（iiyama+BenQ時代、参考資料）
-- `scripts/switch-main.sh` — Key2: メイン入替スクリプト（M3 Air 用）
-- `scripts/switch-pbp.sh` — Key3: PBP切替スクリプト（M3 Air 用）
-- `scripts/display-watchdog.sh` — メインモニタの幽霊スペース対策 watchdog（M3 Air 用）
+- `scripts/m3air/` — M3 Air 用スクリプト（switch-main.sh, switch-pbp.sh, display-watchdog.sh）
+- `scripts/m2max/` — M2 Max 用スクリプト（switch-main.sh, switch-pbp.sh, display-watchdog.sh）
 
 ## アーキテクチャ
 
@@ -52,4 +51,13 @@ KVM（Corne USB）は物理スイッチで切替。
 
 ## 現在のステータス
 
-PD2730S x2 構成への移行中。スクリプトはテンプレート化済み（UUID・入力値は TODO プレースホルダ）。新モニタ到着・接続後に値を確定してテストする。残タスクは `switching-design.md` 末尾を参照。
+PD2730S x2 構成。UUID・入力値は両 Mac とも確定済み。displayplacer 設定とテストが残タスク。残タスクは `switching-design.md` 末尾を参照。
+
+### 入力値 (確定)
+
+| 接続 | 入力値 |
+|---|---|
+| M3 Air → メインモニタ (TB) | 21 |
+| M2 Max → メインモニタ (HDMI) | 17 |
+| M3 Air → サブモニタ (TB) | 21 |
+| M2 Max → サブモニタ (DP) | 15 |

@@ -180,20 +180,22 @@ displayplacer list
 
 ## 接続構成
 
-| 接続 | ケーブル | メインモニタ入力値 | サブモニタ入力値 |
-|---|---|---|---|
-| M3 Air → メインモニタ | TODO | TODO | — |
-| M2 Max → メインモニタ | TODO | TODO | — |
-| M3 Air → サブモニタ | TODO | — | TODO |
-| M2 Max → サブモニタ | TODO | — | TODO |
+| 接続 | ケーブル | 入力値 (0x60) |
+|---|---|---|
+| M3 Air → メインモニタ | Thunderbolt | 21 (TB) |
+| M2 Max → メインモニタ | HDMI | 17 (HDMI) |
+| M3 Air → サブモニタ | Thunderbolt | 21 (TB) |
+| M2 Max → サブモニタ | DisplayPort | 15 (DP) |
 
-## UUID 一覧（モニタ接続後に確認）
+## UUID 一覧
 
 | ディスプレイ | モード | M3 Air UUID | M2 Max UUID |
 |---|---|---|---|
-| メインモニタ (PD2730S) | — | TODO | TODO |
-| サブモニタ (PD2730S) | PBP オフ | TODO | TODO |
-| サブモニタ (PD2730S) | PBP オン | TODO | TODO |
+| メインモニタ | — | `2DF75969-A2F5-4608-A9B4-429B3A3CA4BB` | `7A782274-C5F3-414C-B90A-41770749B121` |
+| サブモニタ | PBP オフ | `B02476A6-81D7-444F-B03B-DC515516025A` | `4A8F5105-1777-4D51-8E49-ECDD133C3D7B` |
+| サブモニタ | PBP オン | `4B3EC4EE-1A27-499D-A8A0-DA1F9B545E20` | `C2E62FA2-0938-463E-92B2-FD77960B47C5` |
+
+サブモニタは PBP のオン/オフで UUID が変わるため、スクリプトでは両UUIDを試行するヘルパー関数 (`sub_get` / `sub_set`) を使う。
 
 ---
 
@@ -201,22 +203,23 @@ displayplacer list
 
 | ファイル | 機能 | テスト状況 |
 |---|---|---|
-| `~/scripts/switch-main.sh` | Key2: メイン入替 + メインモニタ connected 管理 + 主ディスプレイ設定 | 未テスト（新構成） |
-| `~/scripts/switch-pbp.sh` | Key3: PBP切替のみ | 未テスト（新構成） |
-| `~/scripts/display-watchdog.sh` | サブモニタを見てメインモニタ connected を補完管理 | 未テスト（新構成） |
+| `scripts/m3air/switch-main.sh` / `scripts/m2max/switch-main.sh` | Key2: メイン入替 + メインモニタ connected 管理 + 主ディスプレイ設定 | 未テスト |
+| `scripts/m3air/switch-pbp.sh` / `scripts/m2max/switch-pbp.sh` | Key3: PBP切替のみ | 未テスト |
+| `scripts/m3air/display-watchdog.sh` / `scripts/m2max/display-watchdog.sh` | サブモニタを見てメインモニタ connected を補完管理 | 未テスト |
 
-M3 Air 用。M2 Max 用は UUID と入力値定数を変更する。
+両 Mac 用に分離。UUID・入力値は各スクリプト先頭で確定済み。
 
 ---
 
 ## 未完了タスク
 
-### 新モニタ到着後
+### 初期セットアップ
 
-- [ ] ケーブル接続方式の確定と入力値の確認
-- [ ] 2台の PD2730S の UUID 確認（PBPオン/オフ両方）
-- [ ] スクリプトの TODO プレースホルダを実際の値に置換
-- [ ] displayplacer のインストールとモニタ ID 確認
+- [x] ケーブル接続方式の確定と入力値の確認
+- [x] 2台の PD2730S の UUID 確認（PBPオン/オフ両方）
+- [x] スクリプトに実値を反映
+- [ ] displayplacer のインストールとモニタ ID 確認 (`brew install displayplacer` → `displayplacer list`)
+- [ ] switch-main.sh の displayplacer コマンドを有効化
 - [ ] PBP右側(0x7E)の KVM 連動可否を調査（OSD設定 / DDC PBP swap）
 
 ### テスト
