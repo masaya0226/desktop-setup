@@ -8,8 +8,14 @@ MAIN_UUID="7A782274-C5F3-414C-B90A-41770749B121"
 SUB_UUID_OFF="4A8F5105-1777-4D51-8E49-ECDD133C3D7B"
 SUB_UUID_ON="C2E62FA2-0938-463E-92B2-FD77960B47C5"
 
+# === 入力値定数 ===
+MAIN_AIR=21   # TB
+MAIN_MAX=17   # HDMI
+SUB_AIR=21    # TB
+SUB_MAX=15    # DP
+
 # === 自分のメインモニタ入力値 ===
-MY_MAIN_INPUT=17   # M2 Max は HDMI
+MY_MAIN_INPUT=$MAIN_MAX   # M2 Max は HDMI
 
 # === サブモニタ DDC ヘルパー (PBP状態でUUIDが変わるため両方試行) ===
 sub_get() {
@@ -31,43 +37,46 @@ sub_set() {
 }
 
 # === 主ディスプレイ設定 ===
-apply_primary_display() {
-  local pbp=$1
-  if [ "$pbp" = "2" ]; then
-    displayplacer \
-      "id:$MAIN_UUID res:2560x1440 hz:60 color_depth:8 enabled:true scaling:on origin:(0,0) degree:0" \
-      "id:$SUB_UUID_ON res:1280x1440 hz:60 color_depth:8 enabled:true scaling:on origin:(-1280,0) degree:0" \
-      >/dev/null 2>&1 || true
-  else
-    displayplacer \
-      "id:$MAIN_UUID res:2560x1440 hz:60 color_depth:8 enabled:true scaling:on origin:(0,0) degree:0" \
-      "id:$SUB_UUID_OFF res:2560x1440 hz:60 color_depth:8 enabled:true scaling:on origin:(-2560,0) degree:0" \
-      >/dev/null 2>&1 || true
-  fi
+set_main_display() {
+  $BD set -uuid="$MAIN_UUID" -main=on >/dev/null 2>&1 || true
 }
 
-# === 自分が現在メインか判定 ===
+# === メインPC判定 (メインモニタの 0x60 から) ===
 current_main=$($BD get -uuid="$MAIN_UUID" -ddc -vcp=0x60 2>/dev/null || echo "")
 is_self_main=0
 if [ "$current_main" = "$MY_MAIN_INPUT" ]; then
   is_self_main=1
 fi
 
+if [ "$current_main" = "$MAIN_AIR" ]; then
+  SUB_MAIN_PC=$SUB_AIR
+  SUB_OTHER_PC=$SUB_MAX
+else
+  SUB_MAIN_PC=$SUB_MAX
+  SUB_OTHER_PC=$SUB_AIR
+fi
+
 current_pbp=$(sub_get 0x7D)
 [ -z "$current_pbp" ] && current_pbp=0
 
 if [ "$current_pbp" = "2" ]; then
+  # PBP オン → オフ: 先に 0x60=メインPC にしてから PBP off
+  sub_set 0x60 $SUB_MAIN_PC
+  sleep 1
   sub_set 0x7D 0
   NEW_PBP=0
   osascript -e 'display notification "PBP オフ" with title "Desktop Switcher"'
 else
+  # PBP オフ → オン: 不変条件により 0x7E は既にメインPC
   sub_set 0x7D 2
+  sleep 1
+  sub_set 0x60 $SUB_OTHER_PC
   NEW_PBP=2
   osascript -e 'display notification "PBP オン" with title "Desktop Switcher"'
 fi
 
-# === PBP切替後に主ディスプレイ設定 (自分がメインの場合のみ) ===
+# === PBP切替後にメインモニタを主ディスプレイに復帰 (自分がメインの場合のみ) ===
 if [ "$is_self_main" = "1" ]; then
-  sleep 3
-  apply_primary_display "$NEW_PBP"
+  sleep 1
+  set_main_display
 fi

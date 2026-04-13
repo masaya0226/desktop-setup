@@ -39,22 +39,9 @@ sub_set() {
   fi
 }
 
-# === 主ディスプレイ設定 (Main を主、Sub を左に配置) ===
-apply_primary_display() {
-  local pbp=$1
-  if [ "$pbp" = "2" ]; then
-    # PBP on: Sub 半分(1280x1440) を Main の左に
-    displayplacer \
-      "id:$MAIN_UUID res:2560x1440 hz:60 color_depth:8 enabled:true scaling:on origin:(0,0) degree:0" \
-      "id:$SUB_UUID_ON res:1280x1440 hz:60 color_depth:8 enabled:true scaling:on origin:(-1280,0) degree:0" \
-      >/dev/null 2>&1 || true
-  else
-    # PBP off: Sub フル(2560x1440) を Main の左に
-    displayplacer \
-      "id:$MAIN_UUID res:2560x1440 hz:60 color_depth:8 enabled:true scaling:on origin:(0,0) degree:0" \
-      "id:$SUB_UUID_OFF res:2560x1440 hz:60 color_depth:8 enabled:true scaling:on origin:(-2560,0) degree:0" \
-      >/dev/null 2>&1 || true
-  fi
+# === 主ディスプレイ設定 (メインモニタを主ディスプレイに固定) ===
+set_main_display() {
+  $BD set -uuid="$MAIN_UUID" -main=on >/dev/null 2>&1 || true
 }
 
 # === メインモニタが connected=off の場合、一時的に on にして状態取得 ===
@@ -70,14 +57,16 @@ current_pbp=$(sub_get 0x7D)
 [ -z "$current_pbp" ] && current_pbp=0
 
 if [ "$current_main" = "$MAIN_AIR" ]; then
+  # Air → Max
   TARGET_MAIN=$MAIN_MAX
-  TARGET_SUB_LEFT=$SUB_AIR
-  TARGET_SUB_RIGHT=$SUB_MAX
+  TARGET_SUB_MAIN=$SUB_MAX
+  TARGET_SUB_OTHER=$SUB_AIR
   NOTIFY="M2 Max に切替"
 else
+  # Max → Air
   TARGET_MAIN=$MAIN_AIR
-  TARGET_SUB_LEFT=$SUB_MAX
-  TARGET_SUB_RIGHT=$SUB_AIR
+  TARGET_SUB_MAIN=$SUB_AIR
+  TARGET_SUB_OTHER=$SUB_MAX
   NOTIFY="M3 Air に切替"
 fi
 
@@ -85,14 +74,19 @@ fi
 $BD set -uuid="$MAIN_UUID" -ddc -vcp=0x60 -value=$TARGET_MAIN
 
 # === サブモニタの入力切替 ===
+# 不変条件: 0x7E は常にメインPC
 if [ "$current_pbp" = "2" ]; then
+  # PBP on: Sub左(0x60)=他PC, 右(0x7E)=メインPC
   sleep 1
-  sub_set 0x7E $TARGET_SUB_RIGHT
+  sub_set 0x7E $TARGET_SUB_MAIN
   sleep 1
-  sub_set 0x60 $TARGET_SUB_LEFT
+  sub_set 0x60 $TARGET_SUB_OTHER
 else
+  # PBP off: 0x60(表示) と 0x7E(不変条件) をメインPCに
   sleep 1
-  sub_set 0x60 $TARGET_MAIN
+  sub_set 0x60 $TARGET_SUB_MAIN
+  sleep 1
+  sub_set 0x7E $TARGET_SUB_MAIN
 fi
 
 # === メインモニタ connected 管理 (幽霊スペース対策) ===
@@ -102,10 +96,10 @@ else
   $BD set -uuid="$MAIN_UUID" -connected=off 2>/dev/null || true
 fi
 
-# === 主ディスプレイをメインモニタに設定 (自分がメインになった場合のみ) ===
+# === メインモニタを主ディスプレイに復帰 (自分がメインになった場合のみ) ===
 if [ "$MY_MAIN_INPUT" = "$TARGET_MAIN" ]; then
   sleep 1
-  apply_primary_display "$current_pbp"
+  set_main_display
 fi
 
 osascript -e "display notification \"$NOTIFY\" with title \"Desktop Switcher\""

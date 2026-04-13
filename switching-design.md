@@ -1,12 +1,22 @@
 # ディスプレイ切替設計書
 
+## 用語定義
+
+| 用語 | 意味 |
+|---|---|
+| **メインモニタ** | 物理配置で右側のモニタ（PD2730S、PBPなし）。常に主ディスプレイ（メニューバー・Dock 表示先）。 |
+| **サブモニタ** | 物理配置で左側のモニタ（PD2730S、PBP使用）。 |
+| **主ディスプレイ** | macOS の「メインディスプレイ」設定。メインモニタに手動固定。 |
+| **メインPC** | 現在 Corne で操作中の Mac。メインモニタに表示される PC。 |
+| **他PC** | メインPC ではない Mac。PBPオン時のみサブモニタ左半分に表示。 |
+
 ## 構成概要
 
 BenQ PD2730S x2 + Mac x2（M2 Max / M3 Air）の構成。
-物理配置: `[Sub(左)] [Main(右)]`
+物理配置: `[サブモニタ(左)] [メインモニタ(右)]`
 
-- **メインモニタ（右）**: PD2730S（旧BenQ）。PBPなし。macOS 主ディスプレイ。
-- **サブモニタ（左）**: PD2730S（新規購入）。PBP使用。KVM はこちら経由（物理切替）。
+- **メインモニタ**: PD2730S（旧BenQ）。PBPなし。macOS 主ディスプレイ固定。
+- **サブモニタ**: PD2730S（新規購入）。PBP使用。
 
 ## 状態定義
 
@@ -211,6 +221,27 @@ displayplacer list
 
 ---
 
+## 現在の課題 (要調査)
+
+### 1. チェーン実行時に switch-main.sh の直接 DDC write が "Failed." 出力
+- `$BD set -uuid=$MAIN_UUID -ddc -vcp=0x60 -value=$TARGET_MAIN` が stderr に "Failed." を出すケースあり
+- 実際に書き込み失敗しているのか、BetterDisplay の通常出力なのか不明
+- 連続して切替を走らせたとき(S1→S7→S9→S7→S1→S3)、最終状態が期待と異なっていた
+- **要調査**: BetterDisplay の直接 DDC write の出力仕様、および connected=off 状態から enable 直後の DDC 安定性
+
+### 2. PBP 切替直後の DDC 読み取り不安定
+- 切替直後数秒間は、読み取り値が古かったり失敗したりする
+- 書き込み自体は成功しているが、読み取りだけ不安定な可能性が高い
+- 現状のスクリプトは問題なく動作するが、デバッグ時に状態確認が難しい
+
+### 3. チェーン実行後の PBP 左右逆転
+- 長いチェーンテストの最終状態で Sub 0x60/0x7E が想定と逆になった (メインPCが左)
+- 手動で 0x7E/0x60 を swap して修正した
+- 再現条件の特定が必要
+
+### 4. 修正済みバグ (参考)
+- `switch-main.sh` PBP off ブランチで、サブモニタの 0x60/0x7E にメインモニタの入力値 ($TARGET_MAIN) を書き込んでいた。サブモニタの入力値 ($TARGET_SUB_MAIN) を使うように修正済み (m3air/m2max 両方)
+
 ## 未完了タスク
 
 ### 初期セットアップ
@@ -224,20 +255,33 @@ displayplacer list
 - [ ] M2 Max 側の解像度を `displayplacer list` で確認（M3 Air と同じ想定）
 - [ ] PBP右側(0x7E)の KVM 連動可否を調査（OSD設定 / DDC PBP swap）
 
-### テスト
+### テスト状況 (M3 Air 側から実行)
 
-- [ ] S1↔S3 (switch-main.sh、PBPオン時のメイン入替)
-- [ ] S1↔S7 (switch-pbp.sh、M2 Max がメインの状態)
-- [ ] S3↔S9 (switch-pbp.sh、M3 Air がメインの状態)
-- [ ] S7↔S9 (switch-main.sh、PBPオフ時のメイン入替)
-- [ ] display-watchdog.sh の動作テスト
-- [ ] 主ディスプレイがメインモニタに固定されることの確認
+- [x] S1↔S3 (switch-main.sh、PBPオン時のメイン入替) — OK
+- [x] S3↔S9 (switch-pbp.sh、M3 Air がメインの状態) — OK
+- [~] S1↔S7 (switch-pbp.sh、M2 Max がメインの状態) — チェーン実行で通したが最終状態が不整合。単独再テスト必要
+- [~] S7↔S9 (switch-main.sh、PBPオフ時のメイン入替) — バグ修正後のテスト未完了 (チェーン中 "Failed." 出力)
+- [x] switch-main.sh / switch-pbp.sh での BetterDisplay `-main=on` による主ディスプレイ維持 — OK
+- [ ] display-watchdog.sh の動作テスト (未起動)
 - [ ] M2 Max 側からの実行テスト
+- [ ] 長時間運用テスト
 
 ### 実装
 
 - [ ] Hammerspoon 設定（F20/F21 → スクリプト実行）
 - [ ] Vial で Corne の Adjust レイヤーに F20/F21 配置
-- [ ] display-watchdog.sh の launchd 常駐設定
-- [ ] M2 Max 用スクリプト作成（UUID・入力値変更のみ）
+- [ ] display-watchdog.sh の launchd 常駐設定 (両 Mac)
+- [x] M2 Max 用スクリプト作成 — scripts/m2max/ に配置済み (動作未確認)
 - [ ] M2 Max に BetterDisplay, Hammerspoon, displayplacer インストール
+- [ ] M2 Max でリポジトリ clone + 動作確認
+
+## 次セッションでの優先タスク
+
+1. **残テストの再実施** (switch-main.sh バグ修正後)
+   - S9↔S7 / S1↔S7 を単独で確認
+   - "Failed." 出力が再発するか確認
+2. **BetterDisplay "Failed." 出力の解明**
+   - 直接 DDC write の stderr 内容確認
+   - connected enable 直後の sleep を増やすべきか検証
+3. **M2 Max 側の準備と動作確認**
+4. **watchdog の起動と動作確認**
