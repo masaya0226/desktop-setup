@@ -47,14 +47,19 @@ while true; do
   should_be=""
 
   if [ "$pbp" = "2" ]; then
+    # PBPオン: Sub 0x60=自分 → サブ左=自分 → main は他PC → off
     if [ "$sub_main" = "$MY_SUB_INPUT" ]; then
       should_be="off"
     else
       should_be="on"
     fi
   else
-    sleep 4
-    continue
+    # PBPオフ: Sub 0x60=自分 → 自分が active PC → main=on
+    if [ "$sub_main" = "$MY_SUB_INPUT" ]; then
+      should_be="on"
+    else
+      should_be="off"
+    fi
   fi
 
   if [ "$current_connected" != "$should_be" ]; then

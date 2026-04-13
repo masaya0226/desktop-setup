@@ -98,11 +98,19 @@ S7 ←————————→ S9
 
 ### watchdog の判定ロジック
 
+Sub 0x60 は PBP on では「サブ左の入力」、PBP off では「サブ全体の入力」= 現在 active な PC を示す。両モードで `Sub 0x60 == 自分の入力値` を判定材料に使える。
+
 ```
-PBPオン かつ Sub 0x60=自分 → 自分はサブ側 → メインモニタ=off
-PBPオン かつ Sub 0x60≠自分 → 自分がメイン → メインモニタ=on
-PBPオフ → 触らない
+PBPオン:
+  Sub 0x60 = 自分 → 自分はサブ左 (メインは他PC) → connected=off
+  Sub 0x60 ≠ 自分 → 自分がメイン → connected=on
+
+PBPオフ:
+  Sub 0x60 = 自分 → 自分が active PC (メインモニタにも自分) → connected=on
+  Sub 0x60 ≠ 自分 → 他PC が active → connected=off
 ```
+
+> 旧設計では PBP オフ時を「触らない」としていたが、非メイン PC 側の `connected=off` が別状態へ移行した後も残留するケースがあり、メインモニタが真っ暗になる不具合が起きた。PBP オフ時も sub 0x60 を信頼して判定するよう修正。
 
 ### watchdog と切替スクリプトの相互排他
 
