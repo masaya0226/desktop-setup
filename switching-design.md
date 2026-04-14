@@ -449,4 +449,4 @@ DDC バス自体は生きていることが多いが、ユーザ視点では mai
 - [ ] M2 Max 側からの動作テスト (堅牢化後)
 - [ ] 長時間運用テスト
 - [ ] BetterDisplay を macOS 起動項目に入れる (BD host 前提のため)
-- [ ] PBP 右側(0x7E) の KVM 連動可否調査 (OSD設定 / DDC PBP swap、余裕あれば)
+- [x] ~~PBP 右側(0x7E) の KVM 連動可否調査~~ — 調査済。OSD の PBP swap は 0x60 と 0x7E の値交換のみで、DDC から 1 コマンドで発火できる trigger VCP は存在しない (3 snapshot 比較と 0xE4/0xE8 の write テストで確認)。KVM 連動機能も意図 (PBP 左は固定したい) と合わず。現行の `sub_set_verified 0x7E` + `sub_set_verified 0x60` の 2 連打が最適解。
