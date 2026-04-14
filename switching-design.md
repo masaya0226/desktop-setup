@@ -246,12 +246,16 @@ BD の CLI は host app と IPC で通信する。host app が落ちていると
       sub_set_verified 0x60 = TARGET_SUB_MAIN  (0x60 のみ; 0x7E は silent drop するため触らない)
 
 [8] 自分の connected 管理 (幽霊スペース対策)
-    MY_MAIN_INPUT == TARGET_MAIN (自分が新メイン) の場合:
+    MY_MAIN_INPUT == TARGET_MAIN (自分が新メイン; switch-main は現メイン側
+    からしか実行できない構造上ここには通常こない。防御コード):
       main_ensure_connected_on
       sleep 1
       set_main_display
-    else (自分が非メインになる) の場合:
-      $BD set -connected=off
+    else (自分が新非メインになる):
+      PBP on の場合のみ:
+        $BD set -connected=off   # 自分はサブ左に映るので幽霊スペース防止
+      PBP off の場合:
+        何もしない (自分はどこにも映らないので connected 状態は無関係)
 
 [9] 通知
     notify "M3 Air に切替" / "M2 Max に切替"
@@ -288,13 +292,16 @@ BD の CLI は host app と IPC で通信する。host app が落ちていると
       sub_set_verified 0x60 = SUB_OTHER_PC
 
 [7] 自分の connected 管理
+    new_pbp = (current_pbp == 2 ? 0 : 2)
     is_self_main == 1 の場合:
       main_ensure_connected_on
       sleep 1
       set_main_display
-    else:
-      $BD set -connected=off
-    (PBP トグルはメイン PC を変えないので idempotent に固定するだけ)
+    else (自分が非メイン):
+      new_pbp == 2 の場合のみ:
+        $BD set -connected=off   # 自分はサブ左に映るので幽霊スペース防止
+      new_pbp == 0 の場合:
+        何もしない (自分はどこにも映らない)
 
 [8] 通知
     notify "PBP オン" / "PBP オフ"
@@ -321,13 +328,18 @@ BD の CLI は host app と IPC で通信する。host app が落ちていると
         sub_main ≠ 自分 → 自分がメイン → on
       PBPオフ:
         sub_main == 自分 → 自分が active PC → on
-        sub_main ≠ 自分 → 他PC が active → off
+        sub_main ≠ 自分 → 自分は不可視 → should_be 未設定 (何もしない)
 
-  [4] current_connected と不一致なら set
+  [4] should_be が決まっていて、current_connected と不一致なら set
       $BD set -connected=<should_be>
 
   [5] sleep 4
 ```
+
+**設計意図**: watchdog が必要なのは「他 PC 側からの switch 実行で、自分が新メインに
+なる遷移のあと、自分の connected=off 残留を on に戻す」ケースのみ。
+PBP off で自分が非メインかつ不可視の状態では、connected の論理値は
+ユーザ体験に影響しないので触らない (Spaces 再配置コスト回避)。
 
 ### 相互排他と責任分担
 

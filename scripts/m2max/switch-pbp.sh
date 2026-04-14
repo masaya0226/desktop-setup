@@ -164,20 +164,25 @@ current_pbp=$(sub_get 0x7D)
 if [ "$current_pbp" = "2" ]; then
   sub_set_verified 0x60 $SUB_MAIN_PC
   sub_set_verified 0x7D 0
+  new_pbp=0
   NOTIFY="PBP オフ"
 else
   sub_set_verified 0x7D 2
   sub_set_verified 0x7E $SUB_MAIN_PC
   sub_set_verified 0x60 $SUB_OTHER_PC
+  new_pbp=2
   NOTIFY="PBP オン"
 fi
 
+# connected 管理: 非メインは new_pbp=2 の時だけ off (PBP off では不可視なので触らない)
 if [ "$is_self_main" = "1" ]; then
   main_ensure_connected_on || true
   sleep 1
   set_main_display
 else
-  $BD set -uuid="$MAIN_UUID" -connected=off 2>/dev/null || true
+  if [ "$new_pbp" = "2" ]; then
+    $BD set -uuid="$MAIN_UUID" -connected=off 2>/dev/null || true
+  fi
 fi
 
 notify "$NOTIFY"

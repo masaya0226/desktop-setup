@@ -220,7 +220,10 @@ if [ "$MY_MAIN_INPUT" = "$TARGET_MAIN" ]; then
   sleep 1
   set_main_display
 else
-  $BD set -uuid="$MAIN_UUID" -connected=off 2>/dev/null || true
+  # PBP on の時だけ off (PBP off では自分は不可視なので touch 不要)
+  if [ "$current_pbp" = "2" ]; then
+    $BD set -uuid="$MAIN_UUID" -connected=off 2>/dev/null || true
+  fi
 fi
 
 notify "$NOTIFY"

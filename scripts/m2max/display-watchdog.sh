@@ -47,22 +47,24 @@ while true; do
   should_be=""
 
   if [ "$pbp" = "2" ]; then
-    # PBPオン: Sub 0x60=自分 → サブ左=自分 → main は他PC → off
+    # PBPオン:
+    # Sub 0x60=自分 → サブ左=自分 → main は他PC → off
+    # Sub 0x60≠自分 → 自分がメイン → on
     if [ "$sub_main" = "$MY_SUB_INPUT" ]; then
       should_be="off"
     else
       should_be="on"
     fi
   else
-    # PBPオフ: Sub 0x60=自分 → 自分が active PC → main=on
+    # PBPオフ:
+    # Sub 0x60=自分 → 自分が active PC → on (connected=off 残留の補完)
+    # Sub 0x60≠自分 → 自分は不可視、触らない (Spaces 再配置回避)
     if [ "$sub_main" = "$MY_SUB_INPUT" ]; then
       should_be="on"
-    else
-      should_be="off"
     fi
   fi
 
-  if [ "$current_connected" != "$should_be" ]; then
+  if [ -n "$should_be" ] && [ "$current_connected" != "$should_be" ]; then
     $BD set -uuid="$MAIN_UUID" -connected=$should_be 2>/dev/null || true
   fi
 

@@ -62,16 +62,15 @@ while true; do
     fi
   else
     # PBPオフ時:
-    # Sub 0x60=自分 → 自分が active PC (メインモニタにも自分) → on
-    # Sub 0x60=他PC → 他PC が active → off
+    # Sub 0x60=自分 → 自分が active PC → on (connected=off 残留の補完が必要)
+    # Sub 0x60≠自分 → 自分は不可視。connected の状態はユーザ体験に影響しないので
+    #                 触らない (Spaces 再配置を避けるため)
     if [ "$sub_main" = "$MY_SUB_INPUT" ]; then
       should_be="on"
-    else
-      should_be="off"
     fi
   fi
 
-  if [ "$current_connected" != "$should_be" ]; then
+  if [ -n "$should_be" ] && [ "$current_connected" != "$should_be" ]; then
     $BD set -uuid="$MAIN_UUID" -connected=$should_be 2>/dev/null || true
   fi
 

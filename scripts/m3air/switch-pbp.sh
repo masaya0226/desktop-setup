@@ -179,6 +179,7 @@ if [ "$current_pbp" = "2" ]; then
   # 先に 0x60=メインPC にして [main|main] 状態にしてから PBP off (他PC瞬間露出防止)
   sub_set_verified 0x60 $SUB_MAIN_PC
   sub_set_verified 0x7D 0
+  new_pbp=0
   NOTIFY="PBP オフ"
 else
   # PBP オフ → オン
@@ -186,16 +187,23 @@ else
   sub_set_verified 0x7D 2
   sub_set_verified 0x7E $SUB_MAIN_PC
   sub_set_verified 0x60 $SUB_OTHER_PC
+  new_pbp=2
   NOTIFY="PBP オン"
 fi
 
-# --- connected 管理 (自分がメインなら on、そうでなければ off を idempotent に) ---
+# --- connected 管理 ---
+# self がメイン: 常に on を保証
+# self が非メイン:
+#   new_pbp=2 → 自分はサブ左に映るので幽霊スペース防止のため off
+#   new_pbp=0 → 自分はどこにも映らないので触らない (Spaces 再配置回避)
 if [ "$is_self_main" = "1" ]; then
   main_ensure_connected_on || true
   sleep 1
   set_main_display
 else
-  $BD set -uuid="$MAIN_UUID" -connected=off 2>/dev/null || true
+  if [ "$new_pbp" = "2" ]; then
+    $BD set -uuid="$MAIN_UUID" -connected=off 2>/dev/null || true
+  fi
 fi
 
 notify "$NOTIFY"

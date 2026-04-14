@@ -245,12 +245,20 @@ else
 fi
 
 # --- メインモニタ connected 管理 (幽霊スペース対策) ---
+# 注意: switch-main は現メイン PC 側からしか実行できないため、構造上
+# 常に self は「新非メイン側」になる。if ブランチは防御コード。
 if [ "$MY_MAIN_INPUT" = "$TARGET_MAIN" ]; then
   main_ensure_connected_on || true
   sleep 1
   set_main_display
 else
-  $BD set -uuid="$MAIN_UUID" -connected=off 2>/dev/null || true
+  # 自分が新非メインになる場合
+  # PBP on: 自分はサブ左に映るので幽霊スペース防止のため off
+  # PBP off: 自分はどこにも映らない (connected の状態はユーザ体験に影響しない)
+  #         → 触らない。Spaces 再配置コストを避ける
+  if [ "$current_pbp" = "2" ]; then
+    $BD set -uuid="$MAIN_UUID" -connected=off 2>/dev/null || true
+  fi
 fi
 
 notify "$NOTIFY"
