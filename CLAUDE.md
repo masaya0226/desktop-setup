@@ -54,14 +54,14 @@ Key2 (F19) = メイン入替、Key3 (F20) = PBP 切替。
 
 ## 運用ルール (必読)
 
-1. **現在メインで使っている Mac 側からスクリプトを実行する**。非メイン側の Corne から F19/F20 を押しても、その PC からは DDC が届かず abort する (BenQ は active input の cable 経由でしか DDC 応答しない)。
-2. **次にメインになる PC は awake にしておく**。切替先が sleep だとメインモニタが standby 化して DDC バスごと死に、物理ボタンでしか復旧できなくなる。
+1. **どちらの Mac からでもスクリプトは実行できる**。BD が UUID tracked かつ `connected=on` なら、cable の active input に関わらず DDC が通る (実測確認済)。preflight で自動復旧する。
+2. **次にメインになる PC は awake にしておく**。切替先が sleep だとメインモニタが信号なし状態になる (DDC バスは生きてるがユーザ視点は真っ暗)。事前に起こす or clamshell で外部出力を維持する。
 3. **BetterDisplay 本体 (GUI) は常に起動**。BD CLI は host app と IPC で通信するため host が落ちていると全操作失敗。起動項目に入れておく。
 
 ## 重要な技術情報（ハマりどころ）
 
-- **DDC は active input の cable でしか通らない** — 非メイン PC から main DDC に到達できないのは仕様。スクリプト側は `main_get_input` の空値で検知して abort する。
-- **主モニタが standby に入ると DDC バスが完全に死ぬ** — ソフトで復旧不可。物理ボタン / 相手 PC 起床が必要。
+- **DDC は cable の active input に関わらず通る** — 「非メインから届かない」という直感は誤り。失敗の真因は BD 内部の UUID lost / host app 停止 / `connected=off` など別レイヤ。
+- **主モニタが信号なしでも DDC 自体は生きていることが多い** — 旧設計では「standby で DDC 死ぬ」と書いていたが誤り。ただしユーザ視点は真っ暗なので実害はあり、切替先は awake にしておく。
 - **PBP オフ時の 0x7E 書き込みは BenQ が silent drop する** — exit=0 stderr空 で見かけ成功。不変条件「0x7E=メインPC」は PBP off→on 遷移時に書き直す設計 (`switch-pbp.sh` で実施)。
 - **DDC 連続書き込みには sleep 1 が必要**。書き込み後は read-back 検証 (`sub_set_verified` / `main_set_input_verified`) で確実性を担保。
 - **PBP 切替直後は DDC が数秒不安定**。`main_get_input` は空値時にリトライ。
