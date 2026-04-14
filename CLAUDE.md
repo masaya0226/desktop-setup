@@ -52,12 +52,22 @@ KVM（Corne USB）は物理スイッチで切替。
 
 Key2 (F19) = メイン入替、Key3 (F20) = PBP 切替。
 
+## 運用ルール (必読)
+
+1. **現在メインで使っている Mac 側からスクリプトを実行する**。非メイン側の Corne から F19/F20 を押しても、その PC からは DDC が届かず abort する (BenQ は active input の cable 経由でしか DDC 応答しない)。
+2. **次にメインになる PC は awake にしておく**。切替先が sleep だとメインモニタが standby 化して DDC バスごと死に、物理ボタンでしか復旧できなくなる。
+3. **BetterDisplay 本体 (GUI) は常に起動**。BD CLI は host app と IPC で通信するため host が落ちていると全操作失敗。起動項目に入れておく。
+
 ## 重要な技術情報（ハマりどころ）
 
-- **PBPオフ時の 0x7E への書き込みは BenQ が silent drop する**（exit=0 stderr空 で見かけ成功）。不変条件「0x7E=メインPC」は PBP off→on 遷移時に書き直す設計。
-- **DDC 連続書き込みには sleep 1 が必要**。書き込み後は read-back 検証 (`sub_set_verified`) で確実性を担保。
-- **PBP 切替直後は DDC が不安定**。数秒待つ必要あり。
-- **BetterDisplay connected=off にすると DDC 通信も不可**。`main_get_input` は空値時に最大5回リトライ。
+- **DDC は active input の cable でしか通らない** — 非メイン PC から main DDC に到達できないのは仕様。スクリプト側は `main_get_input` の空値で検知して abort する。
+- **主モニタが standby に入ると DDC バスが完全に死ぬ** — ソフトで復旧不可。物理ボタン / 相手 PC 起床が必要。
+- **PBP オフ時の 0x7E 書き込みは BenQ が silent drop する** — exit=0 stderr空 で見かけ成功。不変条件「0x7E=メインPC」は PBP off→on 遷移時に書き直す設計 (`switch-pbp.sh` で実施)。
+- **DDC 連続書き込みには sleep 1 が必要**。書き込み後は read-back 検証 (`sub_set_verified` / `main_set_input_verified`) で確実性を担保。
+- **PBP 切替直後は DDC が数秒不安定**。`main_get_input` は空値時にリトライ。
+- **BetterDisplay `connected=off` にすると DDC 通信も不可**。復旧時は `main_ensure_connected_on` を使う。
+- **BetterDisplay の UUID 追跡は落ちることがある** (物理 signal 断など)。`$BD get -identifiers` に含まれない状態。`bd_recover_if_lost` が `perform -reconfigure` (= GUI の「Redetect Displays」) で再取得を試みる。
+- **`perform -reconfigure` は諸刃** — 生きている UUID を誤って追跡解除することがあるため、UUID が実際に lost の時だけ呼ぶ (`bd_is_uuid_tracked` で確認してから)。
 - **2台の PD2730S は同一モデル名なので UUID で識別**（`-uuid=` 必須、`-name=` 不可）。
 - **サブモニタは PBP オン/オフで UUID が変わる**。スクリプトは両 UUID を試行する `sub_get`/`sub_set` を使用。
 - **m1ddc の `set pbp` / `set pbp-input` は BenQ では効かない**（Dell 向け実装）。BetterDisplay CLI で任意 VCP コードを叩く。
@@ -80,4 +90,6 @@ Key2 (F19) = メイン入替、Key3 (F20) = PBP 切替。
 
 ## 現在のステータス
 
-M3 Air 側セットアップ完了・実機テスト済み。M2 Max 側も `m2max-setup.md` に沿ってセットアップ済み。残タスクは Vial での Corne キーマップ更新 (F19/F20) と長時間運用テスト。
+M3 Air 側セットアップ完了・実機テスト済み。M2 Max 側も `m2max-setup.md` に沿ってセットアップ済み。スクリプトは堅牢化を複数回実施 (`bd_recover_if_lost` / `main_set_input_verified` / non-main PC 検出 / BD host preflight)。残タスクは Vial での Corne キーマップ更新 (F19/F20)、M2 Max 側からの実行テスト、長時間運用テスト。
+
+設計と処理フローの詳細は `switching-design.md` を参照。
