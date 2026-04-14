@@ -37,7 +37,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```
 
 物理配置: `[Sub(左,PBP)] [Main(右)]`
-KVM（Corne USB）は物理スイッチで切替。
+KVM（Corne USB）は **サブモニタの USB ハブ** に接続。サブは PBP で常時両 PC 接続のため、KVM 切替は USB ハブの向き先だけが動きビデオは動かない (メインに挿すと KVM 切替 = ビデオ入力切替になってしまい不可)。
 
 切替スクリプトと watchdog は `/tmp/desktop-switcher.lock` で相互排他。
 
