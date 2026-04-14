@@ -32,9 +32,19 @@ notify() {
 
 bd_host_alive() { pgrep -x BetterDisplay >/dev/null; }
 
-bd_recover() {
+bd_is_uuid_tracked() {
+  local uuid=$1
+  $BD get -identifiers 2>/dev/null | grep -q "\"UUID\" : \"$uuid\""
+}
+
+bd_recover_if_lost() {
+  local uuid=$1
+  if bd_is_uuid_tracked "$uuid"; then
+    return 0
+  fi
   $BD perform -reconfigure >/dev/null 2>&1 || true
   sleep 2
+  bd_is_uuid_tracked "$uuid"
 }
 
 sub_get() {
@@ -80,9 +90,16 @@ set_main_display() {
 
 main_get_input() {
   local val=""
-  local pass
-  for pass in 1 2; do
-    for _ in 1 2 3 4 5; do
+  for _ in 1 2 3 4 5; do
+    val=$($BD get -uuid="$MAIN_UUID" -ddc -vcp=0x60 2>/dev/null || echo "")
+    if [ -n "$val" ]; then
+      echo "$val"
+      return 0
+    fi
+    sleep 1
+  done
+  if bd_recover_if_lost "$MAIN_UUID"; then
+    for _ in 1 2 3; do
       val=$($BD get -uuid="$MAIN_UUID" -ddc -vcp=0x60 2>/dev/null || echo "")
       if [ -n "$val" ]; then
         echo "$val"
@@ -90,15 +107,21 @@ main_get_input() {
       fi
       sleep 1
     done
-    [ "$pass" = "1" ] && bd_recover
-  done
+  fi
   return 1
 }
 
 main_set_input() {
   local value=$1
-  local err pass
-  for pass in 1 2; do
+  local err
+  for _ in 1 2 3; do
+    err=$($BD set -uuid="$MAIN_UUID" -ddc -vcp=0x60 -value=$value 2>&1 >/dev/null)
+    if [ -z "$err" ] || ! printf '%s' "$err" | grep -qi "fail"; then
+      return 0
+    fi
+    sleep 1
+  done
+  if bd_recover_if_lost "$MAIN_UUID"; then
     for _ in 1 2 3; do
       err=$($BD set -uuid="$MAIN_UUID" -ddc -vcp=0x60 -value=$value 2>&1 >/dev/null)
       if [ -z "$err" ] || ! printf '%s' "$err" | grep -qi "fail"; then
@@ -106,8 +129,7 @@ main_set_input() {
       fi
       sleep 1
     done
-    [ "$pass" = "1" ] && bd_recover
-  done
+  fi
   printf 'main_set_input failed: %s\n' "$err" >&2
   return 1
 }
@@ -128,15 +150,19 @@ main_set_input_verified() {
 }
 
 main_ensure_connected_on() {
-  local err try
-  for try in 1 2 3; do
+  local err
+  err=$($BD set -uuid="$MAIN_UUID" -connected=on 2>&1 >/dev/null)
+  if [ -z "$err" ] || ! printf '%s' "$err" | grep -qi "fail"; then
+    sleep 1
+    return 0
+  fi
+  if bd_recover_if_lost "$MAIN_UUID"; then
     err=$($BD set -uuid="$MAIN_UUID" -connected=on 2>&1 >/dev/null)
     if [ -z "$err" ] || ! printf '%s' "$err" | grep -qi "fail"; then
       sleep 1
       return 0
     fi
-    bd_recover
-  done
+  fi
   return 1
 }
 
