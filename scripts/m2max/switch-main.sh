@@ -32,6 +32,7 @@ notify() {
 
 bd_host_alive() { pgrep -x BetterDisplay >/dev/null; }
 
+# 自動 reconfigure は BD host を不安定にするため無効化 (詳細は m3air switch-main.sh 参照)。
 bd_is_uuid_tracked() {
   local uuid=$1
   $BD get -identifiers 2>/dev/null | grep -q "\"UUID\" : \"$uuid\""
@@ -42,9 +43,8 @@ bd_recover_if_lost() {
   if bd_is_uuid_tracked "$uuid"; then
     return 0
   fi
-  $BD perform -reconfigure >/dev/null 2>&1 || true
-  sleep 2
-  bd_is_uuid_tracked "$uuid"
+  printf 'UUID lost (auto reconfigure disabled): %s\n' "$uuid" >&2
+  return 1
 }
 
 sub_get() {
@@ -180,8 +180,16 @@ if [ "$main_connected" != "on" ]; then
   main_ensure_connected_on || true
 fi
 
-current_main=$(main_get_input || echo "")
-current_pbp=$(sub_get 0x7D)
+# --- 現在状態取得 (メイン/サブは別 DDC バスなので並列実行) ---
+TMP_MAIN_VAL=$(mktemp)
+TMP_PBP_VAL=$(mktemp)
+( main_get_input > "$TMP_MAIN_VAL" 2>/dev/null ) & pid_m=$!
+( sub_get 0x7D    > "$TMP_PBP_VAL"  2>/dev/null ) & pid_p=$!
+wait $pid_m
+wait $pid_p
+current_main=$(cat "$TMP_MAIN_VAL")
+current_pbp=$(cat "$TMP_PBP_VAL")
+rm -f "$TMP_MAIN_VAL" "$TMP_PBP_VAL"
 [ -z "$current_pbp" ] && current_pbp=0
 
 if [ -z "$current_main" ]; then
@@ -201,18 +209,31 @@ else
   NOTIFY="M3 Air に切替"
 fi
 
-if ! main_set_input_verified $TARGET_MAIN; then
-  notify "メインモニタ切替失敗。中断しました。"
-  exit 1
-fi
+# --- メイン+サブ DDC 書き込み (別バスなので並列実行) ---
+# sub 側ヘルパーは bd_recover_if_lost を呼ばないので main 側との reconfigure 競合なし。
+# サブ内部 (0x7E → 0x60) は同一バスなので branch 内で順序維持。
+TMP_MAIN_LOG=$(mktemp)
+TMP_SUB_LOG=$(mktemp)
+
+( main_set_input_verified $TARGET_MAIN 2>"$TMP_MAIN_LOG" ) & pid_m=$!
 
 if [ "$current_pbp" = "2" ]; then
-  sleep 1
-  sub_set_verified 0x7E $TARGET_SUB_MAIN
-  sub_set_verified 0x60 $TARGET_SUB_OTHER
+  ( sub_set_verified 0x7E $TARGET_SUB_MAIN  2>"$TMP_SUB_LOG" \
+    && sub_set_verified 0x60 $TARGET_SUB_OTHER 2>>"$TMP_SUB_LOG" ) & pid_s=$!
 else
-  sleep 1
-  sub_set_verified 0x60 $TARGET_SUB_MAIN
+  ( sub_set_verified 0x60 $TARGET_SUB_MAIN  2>"$TMP_SUB_LOG" ) & pid_s=$!
+fi
+
+wait $pid_m; main_rc=$?
+wait $pid_s; sub_rc=$?
+
+[ -s "$TMP_MAIN_LOG" ] && cat "$TMP_MAIN_LOG" >&2
+[ -s "$TMP_SUB_LOG"  ] && cat "$TMP_SUB_LOG"  >&2
+rm -f "$TMP_MAIN_LOG" "$TMP_SUB_LOG"
+
+if [ $main_rc -ne 0 ]; then
+  notify "メインモニタ切替失敗。中断しました。"
+  exit 1
 fi
 
 if [ "$MY_MAIN_INPUT" = "$TARGET_MAIN" ]; then

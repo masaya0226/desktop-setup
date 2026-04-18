@@ -90,6 +90,6 @@ Key2 (F19) = メイン入替、Key3 (F20) = PBP 切替。
 
 ## 現在のステータス
 
-M3 Air 側セットアップ完了・実機テスト済み。M2 Max 側も `m2max-setup.md` に沿ってセットアップ済み。スクリプトは堅牢化を複数回実施 (`bd_recover_if_lost` / `main_set_input_verified` / non-main PC 検出 / BD host preflight)。残タスクは Vial での Corne キーマップ更新 (F19/F20)、M2 Max 側からの実行テスト、長時間運用テスト。
+M3 Air 側セットアップ完了・実機テスト済み。M2 Max 側も `m2max-setup.md` に沿ってセットアップ済み。スクリプトは堅牢化を複数回実施 (`bd_recover_if_lost` / `main_set_input_verified` / non-main PC 検出 / BD host preflight)。2026-04 に DDC 並列化 (メイン vs サブを並列発射) で書き込みベンチ 43%短縮、同時に自動 reconfigure を無効化 (BD host 不安定化対策)。残タスクは Vial での Corne キーマップ更新 (F19/F20)、M2 Max 側からの実行テスト、長時間運用テスト。
 
 設計と処理フローの詳細は `switching-design.md` を参照。

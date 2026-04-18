@@ -36,10 +36,12 @@ bd_host_alive() {
   pgrep -x BetterDisplay >/dev/null
 }
 
-# === BD 状態リカバリ (Redetect Displays 相当) ===
-# 注意: reconfigure は EDID を返さない display を追跡リストから落とす動きがあるため、
-# UUID が生きている状態で無駄に呼ぶと状況を悪化させうる。
-# bd_recover_if_lost は UUID が実際に identifiers から消えている場合のみ recover する。
+# === BD 状態リカバリ ===
+# 以前は UUID lost 時に `perform -reconfigure` を呼んで再取得を試みていたが、
+# watchdog の in-flight CLI と並列書き込みが重なった状態で reconfigure が走ると
+# BD host が unresponsive になり全 CLI が hang する事象を観測 (2026-04)。
+# 自動 reconfigure は無効化し、lost 検知時は失敗を返してスクリプトを中断。
+# 復旧は手動 (BD host 再起動 or 物理 input 切替) で行う。
 bd_is_uuid_tracked() {
   local uuid=$1
   $BD get -identifiers 2>/dev/null | grep -q "\"UUID\" : \"$uuid\""
@@ -50,9 +52,8 @@ bd_recover_if_lost() {
   if bd_is_uuid_tracked "$uuid"; then
     return 0
   fi
-  $BD perform -reconfigure >/dev/null 2>&1 || true
-  sleep 2
-  bd_is_uuid_tracked "$uuid"
+  printf 'UUID lost (auto reconfigure disabled): %s\n' "$uuid" >&2
+  return 1
 }
 
 # === サブモニタ DDC ヘルパー (PBP状態でUUIDが変わるため両方試行) ===
@@ -202,9 +203,16 @@ if [ "$main_connected" != "on" ]; then
   main_ensure_connected_on || true
 fi
 
-# --- 現在状態取得 ---
-current_main=$(main_get_input || echo "")
-current_pbp=$(sub_get 0x7D)
+# --- 現在状態取得 (メイン/サブは別 DDC バスなので並列実行) ---
+TMP_MAIN_VAL=$(mktemp)
+TMP_PBP_VAL=$(mktemp)
+( main_get_input > "$TMP_MAIN_VAL" 2>/dev/null ) & pid_m=$!
+( sub_get 0x7D    > "$TMP_PBP_VAL"  2>/dev/null ) & pid_p=$!
+wait $pid_m
+wait $pid_p
+current_main=$(cat "$TMP_MAIN_VAL")
+current_pbp=$(cat "$TMP_PBP_VAL")
+rm -f "$TMP_MAIN_VAL" "$TMP_PBP_VAL"
 [ -z "$current_pbp" ] && current_pbp=0
 
 if [ -z "$current_main" ]; then
@@ -225,23 +233,31 @@ else
   NOTIFY="M3 Air に切替"
 fi
 
-# --- メインモニタ入力切替 (書き込み + 読み戻し検証) ---
-if ! main_set_input_verified $TARGET_MAIN; then
-  notify "メインモニタ切替失敗。中断しました。"
-  exit 1
+# --- メイン+サブ DDC 書き込み (別バスなので並列実行) ---
+# sub 側ヘルパーは bd_recover_if_lost を呼ばないので main 側との reconfigure 競合なし。
+# サブ内部 (0x7E → 0x60) は同一バスなので branch 内で順序維持。
+TMP_MAIN_LOG=$(mktemp)
+TMP_SUB_LOG=$(mktemp)
+
+( main_set_input_verified $TARGET_MAIN 2>"$TMP_MAIN_LOG" ) & pid_m=$!
+
+if [ "$current_pbp" = "2" ]; then
+  ( sub_set_verified 0x7E $TARGET_SUB_MAIN  2>"$TMP_SUB_LOG" \
+    && sub_set_verified 0x60 $TARGET_SUB_OTHER 2>>"$TMP_SUB_LOG" ) & pid_s=$!
+else
+  ( sub_set_verified 0x60 $TARGET_SUB_MAIN  2>"$TMP_SUB_LOG" ) & pid_s=$!
 fi
 
-# --- サブモニタ入力切替 ---
-if [ "$current_pbp" = "2" ]; then
-  # PBP on: Sub 左(0x60)=他PC, 右(0x7E)=メインPC
-  # 0x7E を先に変更してから 0x60 (設計書の推奨順)
-  sleep 1
-  sub_set_verified 0x7E $TARGET_SUB_MAIN
-  sub_set_verified 0x60 $TARGET_SUB_OTHER
-else
-  # PBP off: 0x60 のみ。0x7E は silent drop するため触らない
-  sleep 1
-  sub_set_verified 0x60 $TARGET_SUB_MAIN
+wait $pid_m; main_rc=$?
+wait $pid_s; sub_rc=$?
+
+[ -s "$TMP_MAIN_LOG" ] && cat "$TMP_MAIN_LOG" >&2
+[ -s "$TMP_SUB_LOG"  ] && cat "$TMP_SUB_LOG"  >&2
+rm -f "$TMP_MAIN_LOG" "$TMP_SUB_LOG"
+
+if [ $main_rc -ne 0 ]; then
+  notify "メインモニタ切替失敗。中断しました。"
+  exit 1
 fi
 
 # --- メインモニタ connected 管理 (幽霊スペース対策) ---

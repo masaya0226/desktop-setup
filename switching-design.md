@@ -123,13 +123,17 @@ BD の CLI (`$BD get/set`) は **BD GUI 本体 (host app)** と IPC で通信し
 
 これとは別に、BD が内部で **UUID 追跡そのものを落とす** 状態もある。GUI でその display が一覧に出ない / `get -identifiers` に含まれない状態。この場合は `set -connected=on` も "Failed." になる。原因は物理 EDID が返ってこなくなったとき BD が「もう無い」と判定するため。
 
-### `perform -reconfigure` の諸刃性
+### `perform -reconfigure` の諸刃性と自動呼び出し無効化 (2026-04)
 
-BD の Redetect Displays 機能 (`$BD perform -reconfigure`) は GUI の「全て接続する」相当で、UUID lost 状態からの復旧手段になりうる。**が**、reconfigure は **EDID を返さない display を追跡リストから落とす** 動きもある。生きている UUID 相手に reconfigure を呼ぶと逆に UUID を忘れさせてしまうことがあり、状況を悪化させる。
+BD の Redetect Displays 機能 (`$BD perform -reconfigure`) は GUI の「全て接続する」相当で、UUID lost 状態からの復旧手段になりうる。**が**、以下の 2 つの問題が判明している:
 
-そのため:
-- `bd_recover_if_lost(uuid)` — UUID が実際に identifiers から消えている場合**のみ** reconfigure を呼ぶ
-- UUID が tracked のままなら何もしない (「生きている UUID を壊さない」)
+1. **生きている UUID を壊す** — reconfigure は EDID を返さない display を追跡リストから落とす。生きている UUID 相手に呼ぶと逆に UUID を忘れさせてしまい状況を悪化させる。
+2. **BD host を不安定化させる** — watchdog の in-flight CLI と並列 DDC 書き込みが重なった状態で reconfigure が走ると、BD host (GUI 本体) が unresponsive になり以降の全 CLI が hang する事象を観測 (DDC 並列化導入後)。
+
+そのため現在の実装では:
+- `bd_recover_if_lost(uuid)` は **UUID tracked チェックのみ** 行い、lost 時は警告を出して失敗を返す (自動 reconfigure 無効化)
+- UUID lost を検知したスクリプトはそのまま abort
+- 復旧は **手動** (BD host 再起動 `pkill -9 BetterDisplay && open -a BetterDisplay`、もしくは物理 input ボタン切替) で行う
 
 ### BD host (GUI 本体) の生存依存
 
@@ -186,14 +190,14 @@ BD の CLI は host app と IPC で通信する。host app が落ちていると
 |---|---|
 | `bd_host_alive()` | `pgrep -x BetterDisplay` で GUI host app が動いているか確認。preflight で使う。 |
 | `bd_is_uuid_tracked(uuid)` | `get -identifiers` の出力を grep して UUID が BD 追跡下にあるか確認。 |
-| `bd_recover_if_lost(uuid)` | UUID が tracked なら何もせず成功。lost なら `perform -reconfigure` を呼んで sleep 2 → 再確認。tracked な UUID を壊さないことが鍵。 |
+| `bd_recover_if_lost(uuid)` | UUID が tracked なら成功、lost なら警告のみ出して失敗を返す (自動 reconfigure 無効化)。復旧は手動。 |
 
 #### メインモニタ DDC
 
 | 関数 | 役割 |
 |---|---|
-| `main_get_input()` | メインモニタ 0x60 を読む。空値なら 1s 間隔で 5 回リトライ → それでもダメなら `bd_recover_if_lost` → 再度 3 回リトライ。最終的に空なら失敗 (1)。 |
-| `main_set_input(v)` | メインモニタ 0x60 に書き込む。stderr "Failed." 検出で 1s 間隔 3 回リトライ → それでもダメなら `bd_recover_if_lost` → 3 回リトライ。 |
+| `main_get_input()` | メインモニタ 0x60 を読む。空値なら 1s 間隔で 5 回リトライ → それでもダメなら `bd_recover_if_lost` (現在は tracked チェックのみ) → lost なら失敗 (1)。 |
+| `main_set_input(v)` | メインモニタ 0x60 に書き込む。stderr "Failed." 検出で 1s 間隔 3 回リトライ → それでもダメなら `bd_recover_if_lost` → lost なら失敗。 |
 | `main_set_input_verified(v)` | `main_set_input` を呼び、sleep 1 → `main_get_input` で read-back → 一致しないなら最大 3 回再挑戦。**非メイン PC からの無効な write を検出して早期 abort するために使う** (switch-main 限定)。 |
 | `main_ensure_connected_on()` | `set -connected=on`。"Failed." なら `bd_recover_if_lost` → 1 回リトライ。 |
 | `set_main_display()` | `$BD set -main=on` で主ディスプレイをメインモニタに固定。stderr 完全抑制 (効かなくても続行)。 |
@@ -228,9 +232,9 @@ BD の CLI は host app と IPC で通信する。host app が落ちていると
     $BD get -connected を見て、"on" 以外なら main_ensure_connected_on を試行
     (失敗しても || true で継続; 後続の main_get_input で最終判定)
 
-[4] 現在状態読み取り
-    current_main = main_get_input (リトライ + 必要なら bd_recover)
-    current_pbp  = sub_get 0x7D
+[4] 現在状態読み取り (並列実行)
+    current_main = main_get_input  ┐ 別 DDC バスなので
+    current_pbp  = sub_get 0x7D    ┘ メイン/サブを並列発射し wait で回収
     current_main が空 → notify "DDC 読み取り失敗" + exit 1
     → BD UUID lost / host app 停止 / 物理断など本当に読めない時の safeguard
 
@@ -239,20 +243,12 @@ BD の CLI は host app と IPC で通信する。host app が落ちていると
     current_main == MAIN_MAX なら Max → Air
     TARGET_MAIN / TARGET_SUB_MAIN / TARGET_SUB_OTHER を確定
 
-[6] メインモニタ 0x60 書き込み (verified)
-    main_set_input_verified TARGET_MAIN
-    書き込み → read-back → 不一致ならリトライ
-    最終的に一致しなければ notify + exit 1
-    → 非メイン側の silent fail / 書き込み未反映を検出
-
-[7] サブモニタ入力切替
-    PBP on の場合:
-      sleep 1
-      sub_set_verified 0x7E = TARGET_SUB_MAIN  (新メインPCをサブ右へ)
-      sub_set_verified 0x60 = TARGET_SUB_OTHER (新他PCをサブ左へ)
-    PBP off の場合:
-      sleep 1
-      sub_set_verified 0x60 = TARGET_SUB_MAIN  (0x60 のみ; 0x7E は silent drop するため触らない)
+[6] メイン + サブ DDC 書き込み (並列実行)
+    別 DDC バスなのでメイン/サブを並列発射。内部は以下:
+    - メイン: main_set_input_verified TARGET_MAIN (書き + read-back; 失敗なら exit 1)
+    - サブ PBP on: sub_set_verified 0x7E=TARGET_SUB_MAIN → 0x60=TARGET_SUB_OTHER (同一バスなので順序維持)
+    - サブ PBP off: sub_set_verified 0x60=TARGET_SUB_MAIN (0x7E は silent drop するため触らない)
+    sub 側ヘルパーは reconfigure を呼ばないため並走時の競合なし。
 
 [8] 自分の connected 管理 (幽霊スペース対策)
     MY_MAIN_INPUT == TARGET_MAIN (自分が新メイン; switch-main は現メイン側
@@ -282,16 +278,14 @@ BD の CLI は host app と IPC で通信する。host app が落ちていると
 
 [3] main connected 復旧 (同上)
 
-[4] メインPC 判定
-    current_main = main_get_input
-    空なら notify + exit 1
+[4] メインPC 判定 + PBP 状態取得 (並列実行)
+    current_main = main_get_input  ┐ 別 DDC バスなので並列
+    current_pbp  = sub_get 0x7D    ┘
+    current_main が空なら notify + exit 1
     is_self_main = (current_main == MY_MAIN_INPUT)
     SUB_MAIN_PC / SUB_OTHER_PC を current_main から決定 (空値時の Max 決め打ちはしない)
 
-[5] 現在の PBP 状態
-    current_pbp = sub_get 0x7D
-
-[6] PBP トグル
+[5] PBP トグル
     PBP on → off の場合:
       sub_set_verified 0x60 = SUB_MAIN_PC  (先に [main|main] にしてから PBP off で他PCの瞬間露出を防ぐ)
       sub_set_verified 0x7D = 0
@@ -300,7 +294,7 @@ BD の CLI は host app と IPC で通信する。host app が落ちていると
       sub_set_verified 0x7E = SUB_MAIN_PC  (0x7E は switch-main の PBP off 分岐で書けないのでここで書き直す)
       sub_set_verified 0x60 = SUB_OTHER_PC
 
-[7] 自分の connected 管理
+[6] 自分の connected 管理
     new_pbp = (current_pbp == 2 ? 0 : 2)
     is_self_main == 1 の場合:
       main_ensure_connected_on
@@ -312,10 +306,10 @@ BD の CLI は host app と IPC で通信する。host app が落ちていると
       new_pbp == 0 の場合:
         何もしない (自分はどこにも映らない)
 
-[8] 通知
+[7] 通知
     notify "PBP オン" / "PBP オフ"
 
-[9] trap cleanup (sleep 2 → ロック削除)
+[8] trap cleanup (sleep 2 → ロック削除)
 ```
 
 ### `display-watchdog.sh` 処理フロー (launchd 常駐)
@@ -358,7 +352,7 @@ PBP off で自分が非メインかつ不可視の状態では、connected の�
 | PBP on/off トグル + PBP on 時の 0x7E 書き直し | `switch-pbp.sh` |
 | KVM 切替後の非メイン PC の connected 残留補完 | `display-watchdog.sh` |
 | 切替スクリプトと watchdog のレース防止 | `/tmp/desktop-switcher.lock` (mutex) |
-| BD UUID lost 状態からの復旧 | `bd_recover_if_lost` (必要時のみ `perform -reconfigure`) |
+| BD UUID lost 状態からの復旧 | `bd_recover_if_lost` は tracked 確認のみ (自動 reconfigure 無効化)。lost なら abort し手動復旧 (BD host 再起動等)。 |
 
 ---
 
@@ -391,8 +385,8 @@ PBP off で自分が非メインかつ不可視の状態では、connected の�
 - 物理 cable 断
 
 **対処**:
-- BD host を起動 (`open -n -a BetterDisplay`)
-- スクリプトが自動で `bd_recover_if_lost` を叩くので数秒待つ
+- BD host を起動 (`open -a BetterDisplay`)
+- UUID lost はスクリプトが自動復旧せず abort するので、BD host を再起動 (`pkill -9 BetterDisplay && open -a BetterDisplay`)
 - それでもダメなら物理 cable 再接続
 
 ### 症状 2: メインモニタが真っ暗なまま戻らない (信号なし)
@@ -410,7 +404,7 @@ DDC バス自体は生きていることが多いが、ユーザ視点では mai
 
 **原因**: BD の UUID 追跡が落ちた (物理的な signal 断 or reconfigure の副作用)。
 
-**対処**: スクリプトの `bd_recover_if_lost` が自動で試みるが、物理 signal が戻っていない限り再取得できない。物理確認 → `$BD perform -reconfigure` を手動実行も OK。
+**対処**: 物理 signal を戻す (cable / 入力ボタン / 切替先 PC を awake にする)。BD host 側で `$BD perform -reconfigure` を手動実行で再取得を試みる手もあるが、生きている UUID を壊すリスクがあるので最終手段。自動 reconfigure は現在無効化されている。
 
 ### 症状 4: BD CLI が "Host app might not be running" を返す
 
@@ -429,6 +423,7 @@ DDC バス自体は生きていることが多いが、ユーザ視点では mai
 - **watchdog PBP off 対応** (commit 3318005) — 旧 watchdog は PBP off 時「触らない」で非メイン側の connected 残留が残る問題があった。両モードで sub 0x60 で判定するよう修正。
 - **スクリプト堅牢化** (commit 6a7b08f) — `bd_recover` / `main_*_verified` / `bd_host_alive` / preflight を導入。非メイン PC からの誤 write を検出して abort する設計に。
 - **bd_recover の誤用修正** (commit 917cf5d) — reconfigure が生きている UUID を誤って壊す事故を防ぐため、`bd_recover_if_lost` で UUID lost 時のみ呼ぶように変更。
+- **DDC 並列化 + 自動 reconfigure 無効化** (2026-04) — メイン/サブは別 DDC バスなので、読み書きをメイン vs サブで並列発射。書き込みベンチで 9.4s → 5.4s (約43%短縮)。同時に、watchdog の in-flight CLI と並列書き込みが reconfigure と衝突し BD host を unresponsive にする事象を観測したため、`bd_recover_if_lost` の自動 reconfigure を無効化し UUID lost は abort する方針に変更。
 
 ---
 

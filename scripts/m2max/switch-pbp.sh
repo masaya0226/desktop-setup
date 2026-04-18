@@ -29,6 +29,7 @@ notify() {
 
 bd_host_alive() { pgrep -x BetterDisplay >/dev/null; }
 
+# 自動 reconfigure は BD host を不安定にするため無効化 (詳細は m3air switch-main.sh 参照)。
 bd_is_uuid_tracked() {
   local uuid=$1
   $BD get -identifiers 2>/dev/null | grep -q "\"UUID\" : \"$uuid\""
@@ -39,9 +40,8 @@ bd_recover_if_lost() {
   if bd_is_uuid_tracked "$uuid"; then
     return 0
   fi
-  $BD perform -reconfigure >/dev/null 2>&1 || true
-  sleep 2
-  bd_is_uuid_tracked "$uuid"
+  printf 'UUID lost (auto reconfigure disabled): %s\n' "$uuid" >&2
+  return 1
 }
 
 sub_get() {
@@ -139,7 +139,18 @@ if [ "$main_connected" != "on" ]; then
   main_ensure_connected_on || true
 fi
 
-current_main=$(main_get_input || echo "")
+# --- メインPC 判定 + PBP 状態取得 (別 DDC バスなので並列実行) ---
+TMP_MAIN_VAL=$(mktemp)
+TMP_PBP_VAL=$(mktemp)
+( main_get_input > "$TMP_MAIN_VAL" 2>/dev/null ) & pid_m=$!
+( sub_get 0x7D    > "$TMP_PBP_VAL"  2>/dev/null ) & pid_p=$!
+wait $pid_m
+wait $pid_p
+current_main=$(cat "$TMP_MAIN_VAL")
+current_pbp=$(cat "$TMP_PBP_VAL")
+rm -f "$TMP_MAIN_VAL" "$TMP_PBP_VAL"
+[ -z "$current_pbp" ] && current_pbp=0
+
 if [ -z "$current_main" ]; then
   notify "メインモニタ DDC 読み取り失敗。中断しました。"
   exit 1
@@ -157,9 +168,6 @@ else
   SUB_MAIN_PC=$SUB_MAX
   SUB_OTHER_PC=$SUB_AIR
 fi
-
-current_pbp=$(sub_get 0x7D)
-[ -z "$current_pbp" ] && current_pbp=0
 
 if [ "$current_pbp" = "2" ]; then
   sub_set_verified 0x60 $SUB_MAIN_PC
