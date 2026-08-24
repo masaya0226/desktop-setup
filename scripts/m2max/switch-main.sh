@@ -11,10 +11,16 @@ trap cleanup EXIT
 
 BD="/Applications/BetterDisplay.app/Contents/MacOS/BetterDisplay"
 
-# === UUID (M2 Max から見た値) ===
-MAIN_UUID="7A782274-C5F3-414C-B90A-41770749B121"
-SUB_UUID_OFF="4A8F5105-1777-4D51-8E49-ECDD133C3D7B"
-SUB_UUID_ON="C2E62FA2-0938-463E-92B2-FD77960B47C5"
+# === ディスプレイ識別 (UUID は動的解決) ===
+# BD の UUID はハードコード禁止。TB/DP の再列挙で portID が変わると BD が
+# 同一個体に別 UUID を採番するため (2026-08 に実際に発生し全切替が停止した)。
+# 個体固有の EDID シリアルから毎回引き直す。EDID が読めず Generic Display に
+# 落ちた場合に備えて model 番号を第二キーにする。
+MAIN_SERIAL="GAS00262019"; MAIN_MODEL="32908"   # メインモニタ (右)
+SUB_SERIAL="E1T00045019";  SUB_MODEL="32907"    # サブモニタ (左, PBP)
+
+MAIN_UUID=""
+SUB_UUID=""
 
 # === 入力値定数 ===
 MAIN_AIR=21   # TB
@@ -26,45 +32,76 @@ SUB_MAX=15    # DP
 MY_MAIN_INPUT=$MAIN_MAX
 MY_SUB_INPUT=$SUB_MAX
 
+# === 通知 ===
 notify() {
   osascript -e "display notification \"$1\" with title \"Desktop Switcher\"" 2>/dev/null || true
 }
 
-bd_host_alive() { pgrep -x BetterDisplay >/dev/null; }
-
-# 自動 reconfigure は BD host を不安定にするため無効化 (詳細は m3air switch-main.sh 参照)。
-bd_is_uuid_tracked() {
-  local uuid=$1
-  $BD get -identifiers 2>/dev/null | grep -q "\"UUID\" : \"$uuid\""
+# === BD host (GUI 本体) が動いているか ===
+bd_host_alive() {
+  pgrep -x BetterDisplay >/dev/null
 }
 
-bd_recover_if_lost() {
-  local uuid=$1
-  if bd_is_uuid_tracked "$uuid"; then
-    return 0
-  fi
-  printf 'UUID lost (auto reconfigure disabled): %s\n' "$uuid" >&2
+# === UUID 動的解決 ===
+# `$BD get -identifiers` の出力から、指定フィールドが一致する
+# エントリの UUID を返す。UUID は各オブジェクトの先頭キー。
+bd_uuid_by_field() {
+  local field=$1 want=$2 uuid="" line val
+  while IFS= read -r line; do
+    case "$line" in
+      '{'|'},{') uuid="" ;;
+    esac
+    case "$line" in
+      *'"UUID"'*)
+        val=${line#*: \"}; uuid=${val%\"*} ;;
+      *"\"$field\""*)
+        val=${line#*: \"}; val=${val%\"*}
+        if [ "$val" = "$want" ] && [ -n "$uuid" ]; then
+          printf '%s\n' "$uuid"
+          return 0
+        fi ;;
+    esac
+  done < <($BD get -identifiers 2>/dev/null)
   return 1
 }
 
+# MAIN_UUID / SUB_UUID を引き直す。両方取れて別物なら成功。
+# 旧実装の `perform -reconfigure` による復旧はここで置き換わる
+# (reconfigure は BD host を不安定にするため呼ばない)。
+resolve_display_uuids() {
+  MAIN_UUID=$(bd_uuid_by_field alphanumericSerial "$MAIN_SERIAL") \
+    || MAIN_UUID=$(bd_uuid_by_field model "$MAIN_MODEL") \
+    || MAIN_UUID=""
+  SUB_UUID=$(bd_uuid_by_field alphanumericSerial "$SUB_SERIAL") \
+    || SUB_UUID=$(bd_uuid_by_field model "$SUB_MODEL") \
+    || SUB_UUID=""
+  [ -n "$MAIN_UUID" ] && [ -n "$SUB_UUID" ] && [ "$MAIN_UUID" != "$SUB_UUID" ]
+}
+
+# === サブモニタ DDC ヘルパー ===
+# 書き込み直後は DDC バスが数秒不安定で空読み・値ズレが起きる (実測)。
+# 旧実装は 2 つの UUID を順に試すことで実質リトライになっていたため、
+# 単一 UUID 化にあたって明示的なリトライを入れる。
 sub_get() {
-  local vcp=$1
-  local val
-  val=$($BD get -uuid="$SUB_UUID_OFF" -ddc -vcp=$vcp 2>/dev/null || echo "")
-  if [ -z "$val" ]; then
-    val=$($BD get -uuid="$SUB_UUID_ON" -ddc -vcp=$vcp 2>/dev/null || echo "")
-  fi
-  echo "$val"
+  local vcp=$1 val
+  for _ in 1 2 3; do
+    val=$($BD get -uuid="$SUB_UUID" -ddc -vcp=$vcp 2>/dev/null || echo "")
+    if [ -n "$val" ]; then
+      echo "$val"
+      return 0
+    fi
+    sleep 1
+  done
+  echo ""
+  return 1
 }
 
 sub_set() {
-  local vcp=$1
-  local value=$2
-  if ! $BD set -uuid="$SUB_UUID_OFF" -ddc -vcp=$vcp -value=$value 2>/dev/null; then
-    $BD set -uuid="$SUB_UUID_ON" -ddc -vcp=$vcp -value=$value 2>/dev/null || true
-  fi
+  $BD set -uuid="$SUB_UUID" -ddc -vcp=$1 -value=$2 2>/dev/null || true
 }
 
+# PBP off 時の 0x7E 書き込みは BenQ が silent drop するため、
+# 書き込み後に読み戻して一致するまで最大 3 回リトライする。
 sub_set_verified() {
   local vcp=$1
   local value=$2
@@ -76,7 +113,10 @@ sub_set_verified() {
     if [ "$got" = "$value" ]; then
       return 0
     fi
+    # 空読みは UUID が変わった可能性 → 引き直して再挑戦
+    [ -z "$got" ] && resolve_display_uuids
   done
+  # 最終 read-back が空値なら DDC 確認不能として警告抑制
   if [ -z "$got" ]; then
     return 0
   fi
@@ -84,10 +124,13 @@ sub_set_verified() {
   return 1
 }
 
+# === 主ディスプレイ設定 ===
 set_main_display() {
   $BD set -uuid="$MAIN_UUID" -main=on >/dev/null 2>&1 || true
 }
 
+# === メインモニタ DDC 読み取り ===
+# 空読み→リトライ、5 回失敗したら UUID を引き直して再挑戦
 main_get_input() {
   local val=""
   for _ in 1 2 3 4 5; do
@@ -98,7 +141,7 @@ main_get_input() {
     fi
     sleep 1
   done
-  if bd_recover_if_lost "$MAIN_UUID"; then
+  if resolve_display_uuids; then
     for _ in 1 2 3; do
       val=$($BD get -uuid="$MAIN_UUID" -ddc -vcp=0x60 2>/dev/null || echo "")
       if [ -n "$val" ]; then
@@ -111,6 +154,8 @@ main_get_input() {
   return 1
 }
 
+# === メインモニタ DDC 書き込み ===
+# "Failed." 検出でリトライ、3 回失敗したら UUID を引き直して再挑戦
 main_set_input() {
   local value=$1
   local err
@@ -121,7 +166,7 @@ main_set_input() {
     fi
     sleep 1
   done
-  if bd_recover_if_lost "$MAIN_UUID"; then
+  if resolve_display_uuids; then
     for _ in 1 2 3; do
       err=$($BD set -uuid="$MAIN_UUID" -ddc -vcp=0x60 -value=$value 2>&1 >/dev/null)
       if [ -z "$err" ] || ! printf '%s' "$err" | grep -qi "fail"; then
@@ -134,6 +179,7 @@ main_set_input() {
   return 1
 }
 
+# === 書き込み後に読み戻して一致するまでリトライ ===
 main_set_input_verified() {
   local value=$1
   local got
@@ -149,6 +195,8 @@ main_set_input_verified() {
   return 1
 }
 
+# === main connected=on を確実に ===
+# set が Failed. を返したら UUID を引き直して 1 回リトライ
 main_ensure_connected_on() {
   local err
   err=$($BD set -uuid="$MAIN_UUID" -connected=on 2>&1 >/dev/null)
@@ -156,7 +204,7 @@ main_ensure_connected_on() {
     sleep 1
     return 0
   fi
-  if bd_recover_if_lost "$MAIN_UUID"; then
+  if resolve_display_uuids; then
     err=$($BD set -uuid="$MAIN_UUID" -connected=on 2>&1 >/dev/null)
     if [ -z "$err" ] || ! printf '%s' "$err" | grep -qi "fail"; then
       sleep 1
@@ -170,11 +218,19 @@ main_ensure_connected_on() {
 # === 本体処理 ===
 # =============================================================
 
+# --- preflight: BD host alive ---
 if ! bd_host_alive; then
   notify "BetterDisplay 本体未起動。中断しました。"
   exit 1
 fi
 
+# --- preflight: UUID 解決 ---
+if ! resolve_display_uuids; then
+  notify "ディスプレイ識別失敗。scripts/resolve-displays.sh で確認してください。"
+  exit 1
+fi
+
+# --- main connected が off または空なら on へ復旧 ---
 main_connected=$($BD get -uuid="$MAIN_UUID" -connected 2>/dev/null || echo "")
 if [ "$main_connected" != "on" ]; then
   main_ensure_connected_on || true
@@ -197,6 +253,7 @@ if [ -z "$current_main" ]; then
   exit 1
 fi
 
+# --- トグル方向決定 ---
 if [ "$current_main" = "$MAIN_AIR" ]; then
   TARGET_MAIN=$MAIN_MAX
   TARGET_SUB_MAIN=$SUB_MAX
@@ -210,7 +267,6 @@ else
 fi
 
 # --- メイン+サブ DDC 書き込み (別バスなので並列実行) ---
-# sub 側ヘルパーは bd_recover_if_lost を呼ばないので main 側との reconfigure 競合なし。
 # サブ内部 (0x7E → 0x60) は同一バスなので branch 内で順序維持。
 TMP_MAIN_LOG=$(mktemp)
 TMP_SUB_LOG=$(mktemp)
@@ -236,12 +292,18 @@ if [ $main_rc -ne 0 ]; then
   exit 1
 fi
 
+# --- メインモニタ connected 管理 (幽霊スペース対策) ---
+# 注意: switch-main は現メイン PC 側からしか実行できないため、構造上
+# 常に self は「新非メイン側」になる。if ブランチは防御コード。
 if [ "$MY_MAIN_INPUT" = "$TARGET_MAIN" ]; then
   main_ensure_connected_on || true
   sleep 1
   set_main_display
 else
-  # PBP on の時だけ off (PBP off では自分は不可視なので touch 不要)
+  # 自分が新非メインになる場合
+  # PBP on: 自分はサブ左に映るので幽霊スペース防止のため off
+  # PBP off: 自分はどこにも映らない (connected の状態はユーザ体験に影響しない)
+  #         → 触らない。Spaces 再配置コストを避ける
   if [ "$current_pbp" = "2" ]; then
     $BD set -uuid="$MAIN_UUID" -connected=off 2>/dev/null || true
   fi

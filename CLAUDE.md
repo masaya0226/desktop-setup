@@ -20,6 +20,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - `switching-design.md` — 設計書（状態定義、DDC VCPコード、スクリプト仕様、トラブルシューティング）
 - `m2max-setup.md` — M2 Max 側セットアップ手順書（clone, Hammerspoon, launchd, TCC対策）
+- `scripts/resolve-displays.sh` — ディスプレイ識別診断（両 Mac 共通。切替が動かない時にまず実行）
 - `scripts/m3air/` — M3 Air 用スクリプト（switch-main.sh, switch-pbp.sh, display-watchdog.sh）
 - `scripts/m2max/` — M2 Max 用スクリプト（同上）
 
@@ -66,14 +67,15 @@ Key2 (F19) = メイン入替、Key3 (F20) = PBP 切替。
 - **DDC 連続書き込みには sleep 1 が必要**。書き込み後は read-back 検証 (`sub_set_verified` / `main_set_input_verified`) で確実性を担保。
 - **PBP 切替直後は DDC が数秒不安定**。`main_get_input` は空値時にリトライ。
 - **BetterDisplay `connected=off` にすると DDC 通信も不可**。復旧時は `main_ensure_connected_on` を使う。
-- **BetterDisplay の UUID 追跡は落ちることがある** (物理 signal 断など)。`$BD get -identifiers` に含まれない状態。`bd_recover_if_lost` が `perform -reconfigure` (= GUI の「Redetect Displays」) で再取得を試みる。
-- **`perform -reconfigure` は諸刃** — 生きている UUID を誤って追跡解除することがあるため、UUID が実際に lost の時だけ呼ぶ (`bd_is_uuid_tracked` で確認してから)。
-- **2台の PD2730S は同一モデル名なので UUID で識別**（`-uuid=` 必須、`-name=` 不可）。
-- **サブモニタは PBP オン/オフで UUID が変わる**。スクリプトは両 UUID を試行する `sub_get`/`sub_set` を使用。
+- **BD の UUID をハードコードしてはいけない** — TB/DP の再列挙で `portID` が変わると、BD は同一個体に**別 UUID を採番する**。2026-08 に実際に発生し切替が全停止した。スクリプトは `resolve_display_uuids()` で EDID の `alphanumericSerial` (第一キー) → `model` (第二キー) から毎回引き直す。DDC が読めなくなった時の復旧もこの引き直しが担う。
+- **`perform -reconfigure` は呼ばない** — 生きている UUID を誤って追跡解除するうえ、並列 DDC 書き込みと重なると BD host が unresponsive になる。UUID の引き直しで代替する。
+- **2台の PD2730S は同一モデル名なので `-name=` では識別不可**。シリアルで引いた UUID を `-uuid=` に渡す。
+- **「サブモニタは PBP で UUID が変わる」は誤診だった** — BD の記録上サブ個体の UUID は 1 つだけ。旧「サブ PBP オフ UUID」は実体がメインモニタだった。
+- **診断は `bash scripts/resolve-displays.sh`** — 追跡中ディスプレイ一覧・UUID 解決結果・DDC 実測値をまとめて表示する。切替が動かない時はまずこれ。
 - **m1ddc の `set pbp` / `set pbp-input` は BenQ では効かない**（Dell 向け実装）。BetterDisplay CLI で任意 VCP コードを叩く。
 - **launchd から ~/Documents 配下の bash スクリプトは TCC で実行不可**。watchdog は `~/.local/bin/` にコピーして実行（詳細は m2max-setup.md）。
 
-## 入力値と UUID
+## 入力値とディスプレイ識別子
 
 | 接続 | 入力値 (0x60) |
 |---|---|
@@ -82,14 +84,19 @@ Key2 (F19) = メイン入替、Key3 (F20) = PBP 切替。
 | M3 Air → サブモニタ (TB) | 21 |
 | M2 Max → サブモニタ (DP) | 15 |
 
-| ディスプレイ | モード | M3 Air UUID | M2 Max UUID |
-|---|---|---|---|
-| メインモニタ | — | `2DF75969-A2F5-4608-A9B4-429B3A3CA4BB` | `7A782274-C5F3-414C-B90A-41770749B121` |
-| サブモニタ | PBP オフ | `B02476A6-81D7-444F-B03B-DC515516025A` | `4A8F5105-1777-4D51-8E49-ECDD133C3D7B` |
-| サブモニタ | PBP オン | `4B3EC4EE-1A27-499D-A8A0-DA1F9B545E20` | `C2E62FA2-0938-463E-92B2-FD77960B47C5` |
+UUID は実行時に解決するため、スクリプトが持つ定数は以下だけ (EDID 由来なので両 Mac 共通):
+
+| ディスプレイ | `alphanumericSerial` | `model` |
+|---|---|---|
+| メインモニタ (右) | `GAS00262019` | `32908` |
+| サブモニタ (左, PBP) | `E1T00045019` | `32907` |
 
 ## 現在のステータス
 
-M3 Air 側セットアップ完了・実機テスト済み。M2 Max 側も `m2max-setup.md` に沿ってセットアップ済み。スクリプトは堅牢化を複数回実施 (`bd_recover_if_lost` / `main_set_input_verified` / non-main PC 検出 / BD host preflight)。2026-04 に DDC 並列化 (メイン vs サブを並列発射) で書き込みベンチ 43%短縮、同時に自動 reconfigure を無効化 (BD host 不安定化対策)。残タスクは Vial での Corne キーマップ更新 (F19/F20)、M2 Max 側からの実行テスト、長時間運用テスト。
+M3 Air 側セットアップ完了・実機テスト済み。M2 Max 側も `m2max-setup.md` に沿ってセットアップ済み。スクリプトは堅牢化を複数回実施 (`main_set_input_verified` / non-main PC 検出 / BD host preflight)。2026-04 に DDC 並列化 (メイン vs サブを並列発射) で書き込みベンチ 43%短縮、同時に自動 reconfigure を無効化 (BD host 不安定化対策)。
+
+2026-08: BD が メインモニタに別 UUID を採番したことで切替が全停止する障害が発生。UUID のハードコードを廃止し、EDID シリアルからの動的解決に移行 (`resolve_display_uuids`)。診断用 `scripts/resolve-displays.sh` を追加。M3 Air 側は解決・読み書き経路を検証済み。
+
+残タスクは Vial での Corne キーマップ更新 (F19/F20)、**M2 Max 側でのシリアル一致確認** (`bash scripts/resolve-displays.sh`、HDMI/DP 経由でも同じシリアルが返るかは未検証) と実行テスト、長時間運用テスト。
 
 設計と処理フローの詳細は `switching-design.md` を参照。

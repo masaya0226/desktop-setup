@@ -29,24 +29,24 @@ git clone <このリポジトリのURL> desktop_setup
 cd desktop_setup
 ```
 
-## 3. UUID の確認
+## 3. ディスプレイ識別の確認
 
-scripts/m2max/*.sh の冒頭に定義済みの UUID が現在の M2 Max 環境と一致するか確認する。
+UUID はスクリプトが実行時に解決するため書き換え不要。代わりに、**EDID シリアルが M2 Max 側からも同じ値で見えるか**を確認する。
+
+```bash
+bash scripts/resolve-displays.sh
+```
+
+「解決結果」が `OK` で、MAIN / SUB が別々の UUID に解決されていれば良い。DDC 実測値も併せて表示されるので、`0x60` がメインモニタの現在の入力値 (自分がメインなら 17 = HDMI) になっているかも確認する。
+
+`FAILED` の場合、M2 Max 側 (HDMI / DP 経由) では EDID のシリアルが M3 Air 側 (TB 経由) と違う値で返っている可能性がある。その場合は下記で実際の値を確認し、scripts/m2max/*.sh 冒頭の `MAIN_SERIAL` / `SUB_SERIAL` / `MAIN_MODEL` / `SUB_MODEL` を M2 Max 側の値に合わせる。
 
 ```bash
 BD="/Applications/BetterDisplay.app/Contents/MacOS/BetterDisplay"
 $BD get -identifiers
 ```
 
-出力のうち PD2730S 2台 (メイン / サブ) の UUID と以下を突き合わせる:
-
-- `MAIN_UUID` — メインモニタ (右、PBPなし)
-- `SUB_UUID_OFF` — サブモニタ PBP オフ状態
-- `SUB_UUID_ON` — サブモニタ PBP オン状態
-
-UUID が変わっていたら scripts/m2max/switch-main.sh / switch-pbp.sh / display-watchdog.sh の先頭を書き換える。
-
-> サブモニタは **PBP のオン/オフを一度切替えて両 UUID を取得する**必要がある点に注意。
+> **UUID をハードコードに戻してはいけない。** BD は TB/DP の再列挙で同一個体に別 UUID を採番することがあり、2026-08 にそれで切替が全停止した (詳細は switching-design.md「UUID 動的解決」)。
 
 ## 4. displayplacer の ID 確認
 
@@ -61,12 +61,8 @@ displayplacer list
 以下を順番に単独実行し、期待状態になるか確認:
 
 ```bash
-# 現在の状態を dump
-BD="/Applications/BetterDisplay.app/Contents/MacOS/BetterDisplay"
-$BD get -uuid=<MAIN_UUID> -ddc -vcp=0x60
-$BD get -uuid=<SUB_UUID_OFF or ON> -ddc -vcp=0x7D
-$BD get -uuid=<SUB_UUID_OFF or ON> -ddc -vcp=0x60
-$BD get -uuid=<SUB_UUID_OFF or ON> -ddc -vcp=0x7E
+# 現在の状態を dump (UUID 解決 + DDC 実測をまとめて表示)
+bash scripts/resolve-displays.sh
 
 # テスト
 bash scripts/m2max/switch-main.sh    # メイン入替 (Key2)
@@ -175,7 +171,9 @@ cat /tmp/desktop-watchdog.err.log            # 空であること
 
 ```bash
 BD="/Applications/BetterDisplay.app/Contents/MacOS/BetterDisplay"
-MAIN_UUID="<M2 Max 側の MAIN_UUID>"
+# 現在の MAIN_UUID は resolve-displays.sh の出力から取る
+MAIN_UUID=$(bash scripts/resolve-displays.sh | awk '/^  MAIN \(serial/ {print $NF}')
+echo "$MAIN_UUID"
 
 # わざと connected=off にして watchdog が on に戻すか確認
 $BD set -uuid=$MAIN_UUID -connected=off

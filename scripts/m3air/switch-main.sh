@@ -11,10 +11,16 @@ trap cleanup EXIT
 
 BD="/Applications/BetterDisplay.app/Contents/MacOS/BetterDisplay"
 
-# === UUID (M3 Air から見た値) ===
-MAIN_UUID="2DF75969-A2F5-4608-A9B4-429B3A3CA4BB"
-SUB_UUID_OFF="B02476A6-81D7-444F-B03B-DC515516025A"
-SUB_UUID_ON="4B3EC4EE-1A27-499D-A8A0-DA1F9B545E20"
+# === ディスプレイ識別 (UUID は動的解決) ===
+# BD の UUID はハードコード禁止。TB/DP の再列挙で portID が変わると BD が
+# 同一個体に別 UUID を採番するため (2026-08 に実際に発生し全切替が停止した)。
+# 個体固有の EDID シリアルから毎回引き直す。EDID が読めず Generic Display に
+# 落ちた場合に備えて model 番号を第二キーにする。
+MAIN_SERIAL="GAS00262019"; MAIN_MODEL="32908"   # メインモニタ (右)
+SUB_SERIAL="E1T00045019";  SUB_MODEL="32907"    # サブモニタ (左, PBP)
+
+MAIN_UUID=""
+SUB_UUID=""
 
 # === 入力値定数 ===
 MAIN_AIR=21   # TB
@@ -36,43 +42,62 @@ bd_host_alive() {
   pgrep -x BetterDisplay >/dev/null
 }
 
-# === BD 状態リカバリ ===
-# 以前は UUID lost 時に `perform -reconfigure` を呼んで再取得を試みていたが、
-# watchdog の in-flight CLI と並列書き込みが重なった状態で reconfigure が走ると
-# BD host が unresponsive になり全 CLI が hang する事象を観測 (2026-04)。
-# 自動 reconfigure は無効化し、lost 検知時は失敗を返してスクリプトを中断。
-# 復旧は手動 (BD host 再起動 or 物理 input 切替) で行う。
-bd_is_uuid_tracked() {
-  local uuid=$1
-  $BD get -identifiers 2>/dev/null | grep -q "\"UUID\" : \"$uuid\""
-}
-
-bd_recover_if_lost() {
-  local uuid=$1
-  if bd_is_uuid_tracked "$uuid"; then
-    return 0
-  fi
-  printf 'UUID lost (auto reconfigure disabled): %s\n' "$uuid" >&2
+# === UUID 動的解決 ===
+# `$BD get -identifiers` の出力から、指定フィールドが一致する
+# エントリの UUID を返す。UUID は各オブジェクトの先頭キー。
+bd_uuid_by_field() {
+  local field=$1 want=$2 uuid="" line val
+  while IFS= read -r line; do
+    case "$line" in
+      '{'|'},{') uuid="" ;;
+    esac
+    case "$line" in
+      *'"UUID"'*)
+        val=${line#*: \"}; uuid=${val%\"*} ;;
+      *"\"$field\""*)
+        val=${line#*: \"}; val=${val%\"*}
+        if [ "$val" = "$want" ] && [ -n "$uuid" ]; then
+          printf '%s\n' "$uuid"
+          return 0
+        fi ;;
+    esac
+  done < <($BD get -identifiers 2>/dev/null)
   return 1
 }
 
-# === サブモニタ DDC ヘルパー (PBP状態でUUIDが変わるため両方試行) ===
+# MAIN_UUID / SUB_UUID を引き直す。両方取れて別物なら成功。
+# 旧実装の `perform -reconfigure` による復旧はここで置き換わる
+# (reconfigure は BD host を不安定にするため呼ばない)。
+resolve_display_uuids() {
+  MAIN_UUID=$(bd_uuid_by_field alphanumericSerial "$MAIN_SERIAL") \
+    || MAIN_UUID=$(bd_uuid_by_field model "$MAIN_MODEL") \
+    || MAIN_UUID=""
+  SUB_UUID=$(bd_uuid_by_field alphanumericSerial "$SUB_SERIAL") \
+    || SUB_UUID=$(bd_uuid_by_field model "$SUB_MODEL") \
+    || SUB_UUID=""
+  [ -n "$MAIN_UUID" ] && [ -n "$SUB_UUID" ] && [ "$MAIN_UUID" != "$SUB_UUID" ]
+}
+
+# === サブモニタ DDC ヘルパー ===
+# 書き込み直後は DDC バスが数秒不安定で空読み・値ズレが起きる (実測)。
+# 旧実装は 2 つの UUID を順に試すことで実質リトライになっていたため、
+# 単一 UUID 化にあたって明示的なリトライを入れる。
 sub_get() {
-  local vcp=$1
-  local val
-  val=$($BD get -uuid="$SUB_UUID_OFF" -ddc -vcp=$vcp 2>/dev/null || echo "")
-  if [ -z "$val" ]; then
-    val=$($BD get -uuid="$SUB_UUID_ON" -ddc -vcp=$vcp 2>/dev/null || echo "")
-  fi
-  echo "$val"
+  local vcp=$1 val
+  for _ in 1 2 3; do
+    val=$($BD get -uuid="$SUB_UUID" -ddc -vcp=$vcp 2>/dev/null || echo "")
+    if [ -n "$val" ]; then
+      echo "$val"
+      return 0
+    fi
+    sleep 1
+  done
+  echo ""
+  return 1
 }
 
 sub_set() {
-  local vcp=$1
-  local value=$2
-  if ! $BD set -uuid="$SUB_UUID_OFF" -ddc -vcp=$vcp -value=$value 2>/dev/null; then
-    $BD set -uuid="$SUB_UUID_ON" -ddc -vcp=$vcp -value=$value 2>/dev/null || true
-  fi
+  $BD set -uuid="$SUB_UUID" -ddc -vcp=$1 -value=$2 2>/dev/null || true
 }
 
 # PBP off 時の 0x7E 書き込みは BenQ が silent drop するため、
@@ -88,6 +113,8 @@ sub_set_verified() {
     if [ "$got" = "$value" ]; then
       return 0
     fi
+    # 空読みは UUID が変わった可能性 → 引き直して再挑戦
+    [ -z "$got" ] && resolve_display_uuids
   done
   # 最終 read-back が空値なら DDC 確認不能として警告抑制
   if [ -z "$got" ]; then
@@ -103,7 +130,7 @@ set_main_display() {
 }
 
 # === メインモニタ DDC 読み取り ===
-# 空読み→リトライ、5 回失敗したら UUID lost の場合だけ recover して再挑戦
+# 空読み→リトライ、5 回失敗したら UUID を引き直して再挑戦
 main_get_input() {
   local val=""
   for _ in 1 2 3 4 5; do
@@ -114,7 +141,7 @@ main_get_input() {
     fi
     sleep 1
   done
-  if bd_recover_if_lost "$MAIN_UUID"; then
+  if resolve_display_uuids; then
     for _ in 1 2 3; do
       val=$($BD get -uuid="$MAIN_UUID" -ddc -vcp=0x60 2>/dev/null || echo "")
       if [ -n "$val" ]; then
@@ -128,7 +155,7 @@ main_get_input() {
 }
 
 # === メインモニタ DDC 書き込み ===
-# "Failed." 検出でリトライ、3 回失敗したら UUID lost の場合だけ recover して再挑戦
+# "Failed." 検出でリトライ、3 回失敗したら UUID を引き直して再挑戦
 main_set_input() {
   local value=$1
   local err
@@ -139,7 +166,7 @@ main_set_input() {
     fi
     sleep 1
   done
-  if bd_recover_if_lost "$MAIN_UUID"; then
+  if resolve_display_uuids; then
     for _ in 1 2 3; do
       err=$($BD set -uuid="$MAIN_UUID" -ddc -vcp=0x60 -value=$value 2>&1 >/dev/null)
       if [ -z "$err" ] || ! printf '%s' "$err" | grep -qi "fail"; then
@@ -169,7 +196,7 @@ main_set_input_verified() {
 }
 
 # === main connected=on を確実に ===
-# set が Failed. を返したら UUID lost の場合だけ recover して 1 回リトライ
+# set が Failed. を返したら UUID を引き直して 1 回リトライ
 main_ensure_connected_on() {
   local err
   err=$($BD set -uuid="$MAIN_UUID" -connected=on 2>&1 >/dev/null)
@@ -177,7 +204,7 @@ main_ensure_connected_on() {
     sleep 1
     return 0
   fi
-  if bd_recover_if_lost "$MAIN_UUID"; then
+  if resolve_display_uuids; then
     err=$($BD set -uuid="$MAIN_UUID" -connected=on 2>&1 >/dev/null)
     if [ -z "$err" ] || ! printf '%s' "$err" | grep -qi "fail"; then
       sleep 1
@@ -194,6 +221,12 @@ main_ensure_connected_on() {
 # --- preflight: BD host alive ---
 if ! bd_host_alive; then
   notify "BetterDisplay 本体未起動。中断しました。"
+  exit 1
+fi
+
+# --- preflight: UUID 解決 ---
+if ! resolve_display_uuids; then
+  notify "ディスプレイ識別失敗。scripts/resolve-displays.sh で確認してください。"
   exit 1
 fi
 
@@ -234,7 +267,6 @@ else
 fi
 
 # --- メイン+サブ DDC 書き込み (別バスなので並列実行) ---
-# sub 側ヘルパーは bd_recover_if_lost を呼ばないので main 側との reconfigure 競合なし。
 # サブ内部 (0x7E → 0x60) は同一バスなので branch 内で順序維持。
 TMP_MAIN_LOG=$(mktemp)
 TMP_SUB_LOG=$(mktemp)

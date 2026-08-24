@@ -103,9 +103,10 @@ BD の CLI (`$BD get/set`) は **BD GUI 本体 (host app)** と IPC で通信し
 - **PBP オフ時、0x7E への書き込みは silent drop される** — `$BD set` は exit=0 stderr空 で見かけ成功を返すが値は変わらない。不変条件「0x7E=メインPC」は PBP オン遷移時に書き直す設計にしてある。
 - **連続書き込みには sleep 1 が必要** — 間隔が短いと無視される。`sub_set_verified` が read-back 検証 + リトライでカバー。
 - **PBP 切替直後は DDC が数秒間不安定** — `main_get_input` は空値時にリトライする。
-- **PBP オン/オフでサブモニタの UUID が変わる** — `sub_get` / `sub_set` は両 UUID を試行する。
+- **BD の UUID は不変ではない** — TB/DP の再列挙で `portID` が変わると、BD は同一個体に別 UUID を採番する (2026-08 に実際に発生)。UUID をスクリプトにハードコードしてはいけない。詳細は下の「UUID 動的解決」を参照。
+  - なお旧版にあった「PBP オン/オフでサブモニタの UUID が変わる」は**誤診**だった。BD の記録上サブモニタ個体 (serial `E1T00045019`) の UUID は 1 つしかなく、PBP をまたいでも変わらない。当時「サブ PBP オフ」として記録していた UUID は実際にはメインモニタのものだった。
 - **PBP 切替で 0x60, 0x7E の値は維持される**。
-- **2台の PD2730S は同一モデル名**のため UUID で識別する（`-uuid=` 必須）。
+- **2台の PD2730S は同一モデル名**のため `-name=` では識別できない。スクリプトは EDID の `alphanumericSerial` から UUID を毎回引き直し、`-uuid=` に渡す。
 - **m1ddc の `set pbp` / `set pbp-input` は BenQ では効かない**（Dell 向け実装）。BetterDisplay CLI で任意 VCP を叩く。
 - **KVM は物理スイッチ経由**。DDC 制御不可（全 VCP を KVM 切替前後でダンプし diff ゼロ確認済み）。
 
@@ -130,10 +131,26 @@ BD の Redetect Displays 機能 (`$BD perform -reconfigure`) は GUI の「全�
 1. **生きている UUID を壊す** — reconfigure は EDID を返さない display を追跡リストから落とす。生きている UUID 相手に呼ぶと逆に UUID を忘れさせてしまい状況を悪化させる。
 2. **BD host を不安定化させる** — watchdog の in-flight CLI と並列 DDC 書き込みが重なった状態で reconfigure が走ると、BD host (GUI 本体) が unresponsive になり以降の全 CLI が hang する事象を観測 (DDC 並列化導入後)。
 
-そのため現在の実装では:
-- `bd_recover_if_lost(uuid)` は **UUID tracked チェックのみ** 行い、lost 時は警告を出して失敗を返す (自動 reconfigure 無効化)
-- UUID lost を検知したスクリプトはそのまま abort
-- 復旧は **手動** (BD host 再起動 `pkill -9 BetterDisplay && open -a BetterDisplay`、もしくは物理 input ボタン切替) で行う
+そのため現在の実装では **reconfigure を一切呼ばない**。代わりに下記の UUID 動的解決で復旧する。
+
+### UUID 動的解決 (2026-08)
+
+**BD の UUID は不変ではない。** 2026-08 に、メインモニタが TB の再列挙で `portID` 209768448 → 209768464 に変わり、BD が同一個体 (serial `GAS00262019`、EDID 完全一致、`ioDisplayLocation` も同一) に**別 UUID を採番**した。ハードコードしていた UUID は `Failed.` を返すようになり、切替が完全に停止した。
+
+さらに悪いことに、新しく採番された UUID がスクリプトの `SUB_UUID_OFF` 定数と同じ値だったため、サブモニタ向けの DDC 書き込みがメインモニタに飛ぶ状態になっていた。
+
+そこで UUID のハードコードを廃止し、**個体固有の EDID シリアルから毎回引き直す**方式に変更した。
+
+| キー | メインモニタ (右) | サブモニタ (左, PBP) |
+|---|---|---|
+| `alphanumericSerial` (第一キー) | `GAS00262019` | `E1T00045019` |
+| `model` (第二キー) | `32908` | `32907` |
+
+- シリアルは EDID 由来なので **portID / PBP 状態 / 接続先 Mac に依存しない**。M3 Air 側と M2 Max 側で同じ定数が使える。
+- EDID が読めず BD が Generic Display 扱いにするケースがあるため、`model` を第二キーにフォールバックする。
+- `resolve_display_uuids()` が両方を引き、**両方取れて別物である**ことを確認して初めて成功を返す (片方しか取れない / 同じ UUID に解決された場合は abort)。
+- 旧 `bd_recover_if_lost` が担っていた「読めなくなったときの復旧」は、`resolve_display_uuids()` の呼び直しが担う。reconfigure と違い BD host に副作用がなく、まさに起きた障害 (UUID の変更) をピンポイントで直せる。
+- 診断は `bash scripts/resolve-displays.sh` で行う。追跡中のディスプレイ一覧・解決結果・DDC 実測値をまとめて表示する。
 
 ### BD host (GUI 本体) の生存依存
 
@@ -165,7 +182,7 @@ BD の CLI は host app と IPC で通信する。host app が落ちていると
                     │
                     ▼
           ┌─────────────────┐
-          │  BetterDisplay  │ ← perform -reconfigure (復旧)
+          │  BetterDisplay  │ ← get -identifiers (UUID 動的解決)
           │  CLI + host app │ ← DDC 読み書き
           │                 │ ← connected on/off
           │                 │ ← -main=on (主ディスプレイ)
@@ -189,26 +206,26 @@ BD の CLI は host app と IPC で通信する。host app が落ちていると
 | 関数 | 役割 |
 |---|---|
 | `bd_host_alive()` | `pgrep -x BetterDisplay` で GUI host app が動いているか確認。preflight で使う。 |
-| `bd_is_uuid_tracked(uuid)` | `get -identifiers` の出力を grep して UUID が BD 追跡下にあるか確認。 |
-| `bd_recover_if_lost(uuid)` | UUID が tracked なら成功、lost なら警告のみ出して失敗を返す (自動 reconfigure 無効化)。復旧は手動。 |
+| `bd_uuid_by_field(field, want)` | `get -identifiers` を 1 行ずつ読み、指定フィールドが `want` に一致するエントリの UUID を返す。 |
+| `resolve_display_uuids()` | `MAIN_UUID` / `SUB_UUID` を serial (→ model フォールバック) から引き直す。両方取れて別物なら成功。preflight と、DDC が読めなくなった時の復旧に使う。 |
 
 #### メインモニタ DDC
 
 | 関数 | 役割 |
 |---|---|
-| `main_get_input()` | メインモニタ 0x60 を読む。空値なら 1s 間隔で 5 回リトライ → それでもダメなら `bd_recover_if_lost` (現在は tracked チェックのみ) → lost なら失敗 (1)。 |
-| `main_set_input(v)` | メインモニタ 0x60 に書き込む。stderr "Failed." 検出で 1s 間隔 3 回リトライ → それでもダメなら `bd_recover_if_lost` → lost なら失敗。 |
+| `main_get_input()` | メインモニタ 0x60 を読む。空値なら 1s 間隔で 5 回リトライ → それでもダメなら `resolve_display_uuids` で引き直して 3 回再挑戦 → 失敗 (1)。 |
+| `main_set_input(v)` | メインモニタ 0x60 に書き込む。stderr "Failed." 検出で 1s 間隔 3 回リトライ → それでもダメなら `resolve_display_uuids` で引き直して 3 回再挑戦 → 失敗。 |
 | `main_set_input_verified(v)` | `main_set_input` を呼び、sleep 1 → `main_get_input` で read-back → 一致しないなら最大 3 回再挑戦。**非メイン PC からの無効な write を検出して早期 abort するために使う** (switch-main 限定)。 |
-| `main_ensure_connected_on()` | `set -connected=on`。"Failed." なら `bd_recover_if_lost` → 1 回リトライ。 |
+| `main_ensure_connected_on()` | `set -connected=on`。"Failed." なら `resolve_display_uuids` で引き直して 1 回リトライ。 |
 | `set_main_display()` | `$BD set -main=on` で主ディスプレイをメインモニタに固定。stderr 完全抑制 (効かなくても続行)。 |
 
 #### サブモニタ DDC
 
 | 関数 | 役割 |
 |---|---|
-| `sub_get(vcp)` | PBP on/off で UUID が変わるので両方試行。最初に空値以外が返ったほうを返す。 |
-| `sub_set(vcp, v)` | 両 UUID に順番に書き込み試行。 |
-| `sub_set_verified(vcp, v)` | `sub_set` + 1s → read-back → 不一致なら 3 回再挑戦。最後の read-back が空値なら「確認不能」として警告抑制 (PBP 遷移直後の DDC 不安定を黙殺するため)。 |
+| `sub_get(vcp)` | `SUB_UUID` から VCP を読む。書き込み直後は DDC が不安定で空読みするため 1s 間隔で 3 回リトライ。 |
+| `sub_set(vcp, v)` | `SUB_UUID` に書き込む。 |
+| `sub_set_verified(vcp, v)` | `sub_set` + 1s → read-back → 不一致なら 3 回再挑戦。空読み時は `resolve_display_uuids` で引き直してから再挑戦する。最後の read-back が空値なら「確認不能」として警告抑制 (PBP 遷移直後の DDC 不安定を黙殺するため)。 |
 
 #### 汎用
 
@@ -248,7 +265,7 @@ BD の CLI は host app と IPC で通信する。host app が落ちていると
     - メイン: main_set_input_verified TARGET_MAIN (書き + read-back; 失敗なら exit 1)
     - サブ PBP on: sub_set_verified 0x7E=TARGET_SUB_MAIN → 0x60=TARGET_SUB_OTHER (同一バスなので順序維持)
     - サブ PBP off: sub_set_verified 0x60=TARGET_SUB_MAIN (0x7E は silent drop するため触らない)
-    sub 側ヘルパーは reconfigure を呼ばないため並走時の競合なし。
+    sub 側ヘルパーは UUID の引き直ししか行わず BD host に副作用がないため並走時の競合なし。
 
 [8] 自分の connected 管理 (幽霊スペース対策)
     MY_MAIN_INPUT == TARGET_MAIN (自分が新メイン; switch-main は現メイン側
@@ -352,7 +369,7 @@ PBP off で自分が非メインかつ不可視の状態では、connected の�
 | PBP on/off トグル + PBP on 時の 0x7E 書き直し | `switch-pbp.sh` |
 | KVM 切替後の非メイン PC の connected 残留補完 | `display-watchdog.sh` |
 | 切替スクリプトと watchdog のレース防止 | `/tmp/desktop-switcher.lock` (mutex) |
-| BD UUID lost 状態からの復旧 | `bd_recover_if_lost` は tracked 確認のみ (自動 reconfigure 無効化)。lost なら abort し手動復旧 (BD host 再起動等)。 |
+| BD の UUID 変更 / lost への追随 | `resolve_display_uuids()` が serial (→ model) から引き直す。preflight と DDC 失敗時の両方で呼ぶ。 |
 
 ---
 
@@ -365,13 +382,28 @@ PBP off で自分が非メインかつ不可視の状態では、connected の�
 | M3 Air → サブモニタ | Thunderbolt | 21 (TB) |
 | M2 Max → サブモニタ | DisplayPort | 15 (DP) |
 
-## UUID 一覧
+## ディスプレイ識別子
 
-| ディスプレイ | モード | M3 Air UUID | M2 Max UUID |
-|---|---|---|---|
-| メインモニタ | — | `2DF75969-A2F5-4608-A9B4-429B3A3CA4BB` | `7A782274-C5F3-414C-B90A-41770749B121` |
-| サブモニタ | PBP オフ | `B02476A6-81D7-444F-B03B-DC515516025A` | `4A8F5105-1777-4D51-8E49-ECDD133C3D7B` |
-| サブモニタ | PBP オン | `4B3EC4EE-1A27-499D-A8A0-DA1F9B545E20` | `C2E62FA2-0938-463E-92B2-FD77960B47C5` |
+**UUID はハードコードしない** (2026-08 に BD が同一個体へ別 UUID を採番して切替が全停止したため)。スクリプトは以下のシリアル / モデル番号から `get -identifiers` を引いて UUID を実行時に解決する。EDID 由来なので両 Mac で共通の値が使える。
+
+| ディスプレイ | `alphanumericSerial` | `model` |
+|---|---|---|
+| メインモニタ (右) | `GAS00262019` | `32908` |
+| サブモニタ (左, PBP) | `E1T00045019` | `32907` |
+
+現在の解決結果と DDC 実測値は `bash scripts/resolve-displays.sh` で確認する。
+
+<details>
+<summary>参考: かつてハードコードしていた UUID (現在は使用しない)</summary>
+
+| ディスプレイ | M3 Air UUID | M2 Max UUID |
+|---|---|---|
+| メインモニタ | `2DF75969-…` → 2026-08 に `B02476A6-…` へ変更 | `7A782274-…` |
+| サブモニタ | `4B3EC4EE-…` | `C2E62FA2-…` |
+
+旧表にあった「サブモニタ PBP オフ」の UUID (`B02476A6-…` / `4A8F5105-…`) は誤記で、実体はメインモニタだった。当時メインの UUID とは別値だったため `sub_get` のフォールバックが働き、偶然正しく動いていた。
+
+</details>
 
 ---
 
@@ -402,9 +434,9 @@ DDC バス自体は生きていることが多いが、ユーザ視点では mai
 
 ### 症状 3: 片方の PC だけ見えない / BD GUI で display 一覧から消えた
 
-**原因**: BD の UUID 追跡が落ちた (物理的な signal 断 or reconfigure の副作用)。
+**原因**: BD の UUID 追跡が落ちた (物理的な signal 断) か、UUID が別値に採番し直された。
 
-**対処**: 物理 signal を戻す (cable / 入力ボタン / 切替先 PC を awake にする)。BD host 側で `$BD perform -reconfigure` を手動実行で再取得を試みる手もあるが、生きている UUID を壊すリスクがあるので最終手段。自動 reconfigure は現在無効化されている。
+**対処**: まず `bash scripts/resolve-displays.sh` を実行し、メイン / サブが両方解決できているか確認する。解決できていれば UUID 変更は自動追随済みなので問題ない。解決できていない (= BD が個体を見失っている) 場合は物理 signal を戻す (cable / 入力ボタン / 切替先 PC を awake にする)。BD host 再起動 (`pkill -9 BetterDisplay && open -a BetterDisplay`) も有効。`$BD perform -reconfigure` は生きている UUID を壊すリスクがあるので最終手段。
 
 ### 症状 4: BD CLI が "Host app might not be running" を返す
 
@@ -423,6 +455,7 @@ DDC バス自体は生きていることが多いが、ユーザ視点では mai
 - **watchdog PBP off 対応** (commit 3318005) — 旧 watchdog は PBP off 時「触らない」で非メイン側の connected 残留が残る問題があった。両モードで sub 0x60 で判定するよう修正。
 - **スクリプト堅牢化** (commit 6a7b08f) — `bd_recover` / `main_*_verified` / `bd_host_alive` / preflight を導入。非メイン PC からの誤 write を検出して abort する設計に。
 - **bd_recover の誤用修正** (commit 917cf5d) — reconfigure が生きている UUID を誤って壊す事故を防ぐため、`bd_recover_if_lost` で UUID lost 時のみ呼ぶように変更。
+- **UUID 動的解決への移行** (2026-08) — メインモニタが TB の再列挙で portID が変わり、BD が同一個体 (serial `GAS00262019`) に別 UUID `B02476A6-…` を採番。ハードコードしていた `MAIN_UUID` が `Failed.` を返すようになり切替が全停止した。さらに新 UUID が `SUB_UUID_OFF` 定数と同値だったため、サブ向け DDC 書き込みがメインモニタに飛ぶ危険もあった。UUID のハードコードを廃止し、EDID シリアル (→ model フォールバック) から毎回引き直す方式へ変更。あわせて診断用 `scripts/resolve-displays.sh` を追加し、単一 UUID 化で失われた `sub_get` のリトライを明示的に復活。
 - **DDC 並列化 + 自動 reconfigure 無効化** (2026-04) — メイン/サブは別 DDC バスなので、読み書きをメイン vs サブで並列発射。書き込みベンチで 9.4s → 5.4s (約43%短縮)。同時に、watchdog の in-flight CLI と並列書き込みが reconfigure と衝突し BD host を unresponsive にする事象を観測したため、`bd_recover_if_lost` の自動 reconfigure を無効化し UUID lost は abort する方針に変更。
 
 ---
