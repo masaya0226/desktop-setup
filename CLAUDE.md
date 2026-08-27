@@ -21,6 +21,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `switching-design.md` — 設計書（状態定義、DDC VCPコード、スクリプト仕様、トラブルシューティング）
 - `m2max-setup.md` — M2 Max 側セットアップ手順書（clone, Hammerspoon, launchd, TCC対策）
 - `scripts/resolve-displays.sh` — ディスプレイ識別診断（両 Mac 共通。切替が動かない時にまず実行）
+- `scripts/check-spaces-health.sh` — Spaces 健全性診断（両 Mac 共通。Mission Control が開かない / フルスクリーンに切り替えられない時に実行）
 - `scripts/m3air/` — M3 Air 用スクリプト（switch-main.sh, switch-pbp.sh, display-watchdog.sh）
 - `scripts/m2max/` — M2 Max 用スクリプト（同上）
 

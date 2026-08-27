@@ -152,6 +152,54 @@ BD の Redetect Displays 機能 (`$BD perform -reconfigure`) は GUI の「全�
 - 旧 `bd_recover_if_lost` が担っていた「読めなくなったときの復旧」は、`resolve_display_uuids()` の呼び直しが担う。reconfigure と違い BD host に副作用がなく、まさに起きた障害 (UUID の変更) をピンポイントで直せる。
 - 診断は `bash scripts/resolve-displays.sh` で行う。追跡中のディスプレイ一覧・解決結果・DDC 実測値をまとめて表示する。
 
+### 幽霊スペースエントリ (2026-08)
+
+**UUID 世代交代と `connected` トグルが噛み合うと、macOS 側に消せない残骸が残る。**
+
+2026-08-27 に Mission Control が起動せず、フルスクリーンのスペースにも切り替えられなくなった。原因は `com.apple.spaces` の Monitors に、実在しないディスプレイのエントリが残っていたこと。
+
+```
+Monitor: Main          Current Space id=3   Spaces 4 件
+Monitor: 4B3EC4EE-…    Current Space id=6   Spaces 2 件
+Monitor: 21CAEADE-…    Current Space なし   Spaces 0 件  ← 幽霊
+```
+
+Mission Control は全ディスプレイの current space を列挙してから合成アニメーションを組むため、**current space が nil のエントリが混ざると起動できない**。
+
+#### 生まれる経路
+
+1. `connected=off` の状態 (自分は非メイン、サブ左に表示されている)
+2. その最中に BD が portID 変化で UUID を再採番する
+3. watchdog が**新** UUID で `connected=on` を打つ
+4. macOS からは「旧 UUID の display が消えたまま、新 UUID の display が現れた」ように見える
+5. 旧 UUID のエントリが Current Space を持たない残骸として永久に残る
+
+**`connected` の状態を UUID の世代交代をまたいで持ち越すと幽霊になる**、というのが本質。
+
+#### なぜ今まで起きなかったか
+
+UUID ハードコード時代は、世代交代が起きると BD への書き込みが全て `Failed.` になり、**結果として connected を触らなくなっていた**。切替機能そのものが死ぬ代わりに、幽霊も生まれなかった。UUID 動的解決 (2026-08) で追従できるようになった副作用として顕在化したもので、動的解決が誤りなのではなく、止まっていた経路が復活しただけ。
+
+#### 対策 (2026-08-27)
+
+| 層 | 対策 | 実装 |
+|---|---|---|
+| 予防 | 世代交代を検知したら `connected` を 12 秒触らない | `resolve_and_track()` + `settle_left` |
+| 検出 | 4 分毎に幽霊エントリの有無を確認し、あれば通知 | `count_ghost_spaces()` |
+| 診断 | 人間が構成を目視確認する | `bash scripts/check-spaces-health.sh` |
+
+予防は「portID がバタついている最中に何度も付け外しして残骸を量産する」のを防ぐもので、世代交代そのものは止められない。1 件も作らせない保証はないため、検出とセットで運用する。
+
+#### 掃除の方法
+
+**幽霊エントリは `killall Dock` でも plist 編集でも消えない。** WindowServer がメモリ上に構成を保持しており、`com.apple.spaces.plist` はその写しにすぎないため。
+
+| 方法 | 効果 |
+|---|---|
+| `killall Dock` | 応急処置。Dock がメモリ上の構成を組み直すので Mission Control は一時的に復活する。**幽霊自体は残るので再発する** |
+| plist から該当エントリを削除 | 効かない。WindowServer が次に書き込む際に元に戻る |
+| **ログアウト → 再ログイン** | **恒久的な解消。** WindowServer のユーザセッションごと作り直されるので、実在しないディスプレイのエントリは落ちる |
+
 ### BD host (GUI 本体) の生存依存
 
 BD の CLI は host app と IPC で通信する。host app が落ちていると `Host app might not be running or is not accepting notifications.` で全コマンド失敗。スクリプトは起動時に `pgrep -x BetterDisplay` で host alive を確認し、ダメなら abort する。
@@ -227,11 +275,20 @@ BD の CLI は host app と IPC で通信する。host app が落ちていると
 | `sub_set(vcp, v)` | `SUB_UUID` に書き込む。 |
 | `sub_set_verified(vcp, v)` | `sub_set` + 1s → read-back → 不一致なら 3 回再挑戦。空読み時は `resolve_display_uuids` で引き直してから再挑戦する。最後の read-back が空値なら「確認不能」として警告抑制 (PBP 遷移直後の DDC 不安定を黙殺するため)。 |
 
+#### watchdog 専用 (幽霊スペース対策、2026-08-27 追加)
+
+| 関数 | 役割 |
+|---|---|
+| `resolve_and_track()` | `resolve_display_uuids()` を呼び、UUID が前回と変わっていたら世代交代として記録・通知し `settle_left` をセットする。**watchdog では生の `resolve_display_uuids()` ではなく必ずこちらを使う。** 解決に失敗した場合は `PREV_*` を上書きしない (単なる読み取り失敗を世代交代と誤認せず、次に引けた時に正しく比較するため)。 |
+| `count_ghost_spaces()` | `com.apple.spaces` の Monitors から「`Display Identifier` はあるが `Current Space` がない」エントリ数を返す。`defaults` + `grep -c` だけで判定するので python 等を起動せずに済む。それでも 4 秒ループから毎回叩くには重いので `GHOST_CHECK_EVERY` で間引いて呼ぶ。 |
+| `load_prev_uuids()` / `save_prev_uuids()` | 前回解決した UUID を `/tmp/desktop-watchdog.state` に永続化。`/tmp` に置くのは意図的で、再起動時は macOS 側の Spaces も作り直されるため比較対象が無いのが正しい。 |
+
 #### 汎用
 
 | 関数 | 役割 |
 |---|---|
 | `notify(msg)` | `osascript` で macOS 通知表示。 |
+| `log(msg)` | タイムスタンプ付きで stdout に出力 (watchdog のみ)。launchd の `StandardOutPath` = `/tmp/desktop-watchdog.out.log` に落ちる。平常時は無言で、状態が変わった時だけ書く。 |
 
 ---
 
@@ -332,17 +389,28 @@ BD の CLI は host app と IPC で通信する。host app が落ちていると
 ### `display-watchdog.sh` 処理フロー (launchd 常駐)
 
 ```
+起動時:
+  load_prev_uuids   (/tmp/desktop-watchdog.state から前回の UUID を読む)
+  resolve_and_track
+
 無限ループ:
   [1] ロックチェック
       /tmp/desktop-switcher.lock が存在するなら sleep 2 して continue
       30 秒以上古いなら強制削除 (trap 漏れ保険)
 
-  [2] サブモニタ状態取得
+  [2] 幽霊スペースの定期チェック (GHOST_CHECK_EVERY=60 周期 = 4 分毎)
+      count_ghost_spaces > 0 なら log + notify (GHOST_RENOTIFY_SEC=1h に 1 回まで)
+      connected 制御とは独立した健全性監視なので、DDC が読めていようがいまいが回す
+
+  [3] UUID 未解決なら resolve_and_track で引き直し
+      世代交代を検知したら settle_left = SETTLE_CYCLES(3) をセット
+
+  [4] サブモニタ状態取得
       pbp      = sub_get 0x7D
       sub_main = sub_get 0x60
-      どちらか空なら sleep 4 して continue
+      どちらか空なら resolve_and_track して sleep 4 → continue
 
-  [3] main connected の期待値判定
+  [5] main connected の期待値判定
       PBPオン:
         sub_main == 自分 → サブ左=自分、メインは他PC → off
         sub_main ≠ 自分 → 自分がメイン → on
@@ -350,10 +418,14 @@ BD の CLI は host app と IPC で通信する。host app が落ちていると
         sub_main == 自分 → 自分が active PC → on
         sub_main ≠ 自分 → 自分は不可視 → should_be 未設定 (何もしない)
 
-  [4] should_be が決まっていて、current_connected と不一致なら set
-      $BD set -connected=<should_be>
+  [6] should_be が決まっていて、current_connected と不一致なら set
+      ただし settle_left > 0 の間は書き込みを見送り log に残すだけ
+      → UUID がバタついている最中の付け外しが幽霊エントリを量産するため。
+        数周期 (最大 12 秒) 遅れて反映されても実害はない
 
-  [5] sleep 4
+  [7] settle_left をデクリメント
+
+  [8] sleep 4
 ```
 
 **設計意図**: watchdog が必要なのは「他 PC 側からの switch 実行で、自分が新メインに
@@ -370,6 +442,9 @@ PBP off で自分が非メインかつ不可視の状態では、connected の�
 | KVM 切替後の非メイン PC の connected 残留補完 | `display-watchdog.sh` |
 | 切替スクリプトと watchdog のレース防止 | `/tmp/desktop-switcher.lock` (mutex) |
 | BD の UUID 変更 / lost への追随 | `resolve_display_uuids()` が serial (→ model) から引き直す。preflight と DDC 失敗時の両方で呼ぶ。 |
+| UUID 世代交代の検知と、直後の connected 書き込み抑制 | `resolve_and_track()` + `settle_left` (watchdog、12 秒) |
+| 幽霊スペースエントリの検出と通知 | `count_ghost_spaces()` (watchdog、4 分毎) |
+| 幽霊スペースの人力診断 | `bash scripts/check-spaces-health.sh` |
 
 ---
 
@@ -444,6 +519,16 @@ DDC バス自体は生きていることが多いが、ユーザ視点では mai
 
 **対処**: `open -n -a BetterDisplay` で再起動。`hs.autoLaunch(true)` 相当で BD も起動項目に入れておくと予防できる。
 
+### 症状 5: Mission Control が開かない / フルスクリーンのスペースに切り替えられない
+
+**原因**: `com.apple.spaces` に幽霊ディスプレイのエントリ (Current Space を持たない Monitor) が残っている。UUID 世代交代を `connected=off` のままでまたいだときに生まれる。詳細は「幽霊スペースエントリ (2026-08)」の節。
+
+**対処**: まず `bash scripts/check-spaces-health.sh` を実行する。幽霊の有無に加えて、Mission Control 系ホットキーの enabled 状態も表示するので、ショートカット設定側の問題と切り分けられる。
+
+幽霊があれば **ログアウト → 再ログイン** で解消する。今すぐ Mission Control を使いたい場合の応急処置は `killall Dock` (メモリ上の構成が組み直されて一時的に復活するが、幽霊は残るので再発する)。
+
+なお幽霊があること自体は「即座に壊れている」ことを意味しない。Dock 再起動直後は動く。残骸が残ったまま次の Spaces 再配置が起きると壊れる、という関係。
+
 ---
 
 ## 過去の修正履歴（抜粋）
@@ -456,6 +541,7 @@ DDC バス自体は生きていることが多いが、ユーザ視点では mai
 - **スクリプト堅牢化** (commit 6a7b08f) — `bd_recover` / `main_*_verified` / `bd_host_alive` / preflight を導入。非メイン PC からの誤 write を検出して abort する設計に。
 - **bd_recover の誤用修正** (commit 917cf5d) — reconfigure が生きている UUID を誤って壊す事故を防ぐため、`bd_recover_if_lost` で UUID lost 時のみ呼ぶように変更。
 - **UUID 動的解決への移行** (2026-08) — メインモニタが TB の再列挙で portID が変わり、BD が同一個体 (serial `GAS00262019`) に別 UUID `B02476A6-…` を採番。ハードコードしていた `MAIN_UUID` が `Failed.` を返すようになり切替が全停止した。さらに新 UUID が `SUB_UUID_OFF` 定数と同値だったため、サブ向け DDC 書き込みがメインモニタに飛ぶ危険もあった。UUID のハードコードを廃止し、EDID シリアル (→ model フォールバック) から毎回引き直す方式へ変更。あわせて診断用 `scripts/resolve-displays.sh` を追加し、単一 UUID 化で失われた `sub_get` のリトライを明示的に復活。
+- **幽霊スペースエントリ対策** (2026-08-27) — Mission Control が起動せず、フルスクリーンのスペースにも切り替えられなくなった。`com.apple.spaces` に実在しないディスプレイのエントリ (`21CAEADE-…`、Current Space なし) が残っていたのが原因。`connected=off` のまま UUID 世代交代をまたぐと旧 UUID のエントリが残骸化する経路を特定した。UUID ハードコード時代は世代交代で書き込みが全て `Failed.` になり結果的に connected を触らなくなっていたため発現せず、動的解決への移行で経路が復活したもの。watchdog に世代交代検知 (`resolve_and_track`)・安定化待ち (`settle_left`)・幽霊の定期検出 (`count_ghost_spaces`) を追加し、診断用 `scripts/check-spaces-health.sh` を新設。掃除は再ログインが必要 (WindowServer がメモリ上に構成を持つため `killall Dock` や plist 編集では消えない)。
 - **DDC 並列化 + 自動 reconfigure 無効化** (2026-04) — メイン/サブは別 DDC バスなので、読み書きをメイン vs サブで並列発射。書き込みベンチで 9.4s → 5.4s (約43%短縮)。同時に、watchdog の in-flight CLI と並列書き込みが reconfigure と衝突し BD host を unresponsive にする事象を観測したため、`bd_recover_if_lost` の自動 reconfigure を無効化し UUID lost は abort する方針に変更。
 
 ---
@@ -468,6 +554,8 @@ DDC バス自体は生きていることが多いが、ユーザ視点では mai
 - [x] 0x7E silent drop 対策後の全 4 状態遷移
 - [x] watchdog ロック排他動作
 - [x] 非メイン PC 実行時の正常な abort (exit 1 + 通知)
+- [x] 幽霊スペース検出 (`count_ghost_spaces` が実データで残骸 1 件を検出、`check-spaces-health.sh` の表示も確認)
+- [ ] UUID 世代交代の検知と settle 動作 (実際の再採番が起きるまで検証不可。state ファイルへの記録までは確認済み)
 - [ ] M2 Max 側からの実行テスト (堅牢化後)
 - [ ] 長時間運用テスト
 
@@ -477,4 +565,6 @@ DDC バス自体は生きていることが多いが、ユーザ視点では mai
 - [ ] M2 Max 側からの動作テスト (堅牢化後)
 - [ ] 長時間運用テスト
 - [ ] BetterDisplay を macOS 起動項目に入れる (BD host 前提のため)
+- [ ] **幽霊エントリ `21CAEADE-…` の解消** — ログアウト → 再ログインが必要。次に PC を落とすタイミングで解消される
+- [ ] M2 Max 側へ新 watchdog (幽霊スペース対策入り) を再配置
 - [x] ~~PBP 右側(0x7E) の KVM 連動可否調査~~ — 調査済。OSD の PBP swap は 0x60 と 0x7E の値交換のみで、DDC から 1 コマンドで発火できる trigger VCP は存在しない (3 snapshot 比較と 0xE4/0xE8 の write テストで確認)。KVM 連動機能も意図 (PBP 左は固定したい) と合わず。現行の `sub_set_verified 0x7E` + `sub_set_verified 0x60` の 2 連打が最適解。
